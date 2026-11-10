@@ -88,7 +88,6 @@ window.__ModuleLoader__.load({
       'table.workspace': '工作区',
       'table.created': '创建',
       'table.parent': '父会话',
-      'table.actions': '',
       'filter.provider': '提供商…',
       'filter.model': '模型…',
       'filter.kind': '类型…',
@@ -106,15 +105,9 @@ window.__ModuleLoader__.load({
       'origin.unknown': '未知来源',
       'status.ok': '完成',
       'status.error': '失败',
-      'status.copied': '已随重试修正',
-      'ledger.hint': '点击会话行可在“请求”页查看该会话的逐次调用。',
-      'costs.notice.title': '费用估算尚未启用',
-      'costs.notice.body': '价格引擎（版本化价格表、按日重算、导出）尚未提供。在此之前本页不展示任何费用数字，避免把估算当成账单。以下为计费所依据的模型用量数据。',
-      'costs.basis': '计费基础（模型用量）',
-      'context.notice.title': '上下文监控尚未启用',
-      'context.notice.body': '上下文监控将基于 tokenMeter 与请求级 contextWindow 提供实时上下文水位、压缩触发记录与剩余空间预警。',
-      'overview.source': '数据源：本地会话日志账本（SQLite，由 dsh-usage-center 维护）。Token 为模型侧上报值；费用相关功能尚未启用。',
-      'requests.filteredBySession': '会话筛选：{id}',
+      'costs.basis': '模型用量',
+      'costs.pending': '费用估算尚未提供',
+      'context.pending': '上下文监控尚未提供',
     };
 
     const en = {
@@ -176,7 +169,6 @@ window.__ModuleLoader__.load({
       'table.workspace': 'Workspace',
       'table.created': 'Created',
       'table.parent': 'Parent',
-      'table.actions': '',
       'filter.provider': 'Provider…',
       'filter.model': 'Model…',
       'filter.kind': 'Kind…',
@@ -194,15 +186,9 @@ window.__ModuleLoader__.load({
       'origin.unknown': 'Unknown',
       'status.ok': 'OK',
       'status.error': 'Error',
-      'status.copied': 'amended by retry',
-      'ledger.hint': 'Click a session row to inspect its requests on the Requests tab.',
-      'costs.notice.title': 'Cost estimates are not enabled yet',
-      'costs.notice.body': 'The pricing engine (versioned price lists, per-day recalculation, exports) is not available yet. Until then this page shows no cost figures, so an estimate can never be mistaken for a bill. Below is the model usage data pricing will be based on.',
-      'costs.basis': 'Pricing basis (model usage)',
-      'context.notice.title': 'Context monitor is not enabled yet',
-      'context.notice.body': 'The context monitor will add live context watermark, compaction triggers, and remaining-space warnings from tokenMeter and per-request contextWindow data.',
-      'overview.source': 'Source: the local session-log ledger (SQLite, maintained by dsh-usage-center). Tokens are provider-reported values; cost features are not enabled yet.',
-      'requests.filteredBySession': 'Session filter: {id}',
+      'costs.basis': 'Model usage',
+      'costs.pending': 'Cost estimates are not available yet',
+      'context.pending': 'Context monitor is not available yet',
     };
 
     const DICTS = { zh, en };
@@ -318,8 +304,9 @@ window.__ModuleLoader__.load({
 .duc-stat-sub{font-size:12px;color:var(--dsw-alias-label-secondary);margin-top:4px}
 .duc-section{background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:10px;padding:14px 16px;margin-bottom:16px}
 .duc-section-title{font-size:13px;font-weight:600;margin:0 0 10px}
-.duc-note{display:flex;gap:10px;align-items:flex-start;color:var(--dsw-alias-label-secondary);font-size:12.5px;margin-top:8px}
-.duc-warn{border-left:3px solid var(--dsw-alias-state-warn-primary);padding-left:10px}
+.duc-section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 0 10px}
+.duc-section-head .duc-section-title{margin:0}
+.duc-small{font-size:12px}
 .duc-tablewrap{overflow:auto}
 .duc-table{border-collapse:collapse;width:100%;font-size:13px}
 .duc-table th{text-align:left;color:var(--dsw-alias-label-secondary);font-weight:500;padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l2);white-space:nowrap;position:sticky;top:0;background:var(--dsw-alias-bg-layer-1)}
@@ -354,7 +341,6 @@ select.duc-input{min-width:100px}
 .duc-cell[data-level="3"]{background:var(--dsw-alias-brand-primary);opacity:.7}
 .duc-cell[data-level="4"]{background:var(--dsw-alias-brand-primary);opacity:.95}
 .duc-heatlegend{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--dsw-alias-label-secondary);margin-top:8px}
-.duc-footnote{color:var(--dsw-alias-label-secondary);font-size:12px;margin-top:4px}
 .duc-glyph{color:var(--dsw-alias-label-secondary)}
 .duc-glyph[data-active=true]{color:var(--dsw-alias-label-primary)}
 `;
@@ -564,7 +550,6 @@ select.duc-input{min-width:100px}
             ),
           ),
         ),
-        h('p', { className: 'duc-footnote' }, t('overview.source')),
       );
     }
 
@@ -618,7 +603,6 @@ select.duc-input{min-width:100px}
               type: 'button', className: 'duc-iconbtn',
               onClick: () => setFilters({ page: 0 }),
             }, t('filter.clear')) : null,
-          filters.sessionId ? h('span', { className: 'duc-muted' }, t('requests.filteredBySession', { id: filters.sessionId })) : null,
         ),
         h(StateView, { loading, error, empty: !loading && total === 0, onRetry: refresh, t },
           h('div', { className: 'duc-tablewrap' },
@@ -679,7 +663,6 @@ select.duc-input{min-width:100px}
       const items = result?.items ?? [];
       const total = result?.total ?? 0;
       return h('div', null,
-        h('p', { className: 'duc-footnote', style: { marginBottom: 10 } }, t('ledger.hint')),
         h(StateView, { loading, error, empty: !loading && total === 0, onRetry: refresh, t },
           h('div', { className: 'duc-tablewrap' },
             h('table', { className: 'duc-table' },
@@ -693,6 +676,7 @@ select.duc-input{min-width:100px}
                 h('th', { className: 'num' }, t('table.total')),
                 h('th', { className: 'num' }, t('table.errors')),
                 h('th', null, t('table.lastActivity')),
+                h('th', { 'aria-hidden': 'true' }),
               )),
               h('tbody', null, items.map((s) =>
                 h('tr', {
@@ -713,6 +697,7 @@ select.duc-input{min-width:100px}
                   h('td', { className: 'num' }, fmt.compact(s.totalTokens)),
                   h('td', { className: 'num' }, s.errorCount > 0 ? h('span', { className: 'duc-error' }, fmt.int(s.errorCount)) : h('span', { className: 'duc-muted' }, '–')),
                   h('td', null, fmt.dateTime(s.lastTimestamp)),
+                  h('td', { className: 'duc-muted', 'aria-hidden': 'true' }, '›'),
                 ))),
             ),
           ),
@@ -735,35 +720,32 @@ select.duc-input{min-width:100px}
         [],
       );
       const rows = data?.res?.rows ?? [];
-      return h('div', null,
+      return h(StateView, { loading, error, empty: !loading && rows.length === 0, onRetry: refresh, t },
         h('div', { className: 'duc-section' },
-          h('h3', { className: 'duc-section-title' }, t('costs.notice.title')),
-          h('p', { className: 'duc-note duc-warn', style: { marginTop: 0 } }, t('costs.notice.body')),
-        ),
-        h(StateView, { loading, error, empty: !loading && rows.length === 0, onRetry: refresh, t },
-          h('div', { className: 'duc-section' },
+          h('div', { className: 'duc-section-head' },
             h('h3', { className: 'duc-section-title' }, t('costs.basis')),
-            h('div', { className: 'duc-tablewrap' },
-              h('table', { className: 'duc-table' },
-                h('thead', null, h('tr', null,
-                  h('th', null, t('table.model')),
-                  h('th', { className: 'num' }, t('table.requests')),
-                  h('th', { className: 'num' }, t('table.input')),
-                  h('th', { className: 'num' }, t('table.output')),
-                  h('th', { className: 'num' }, t('table.cacheRead')),
-                  h('th', { className: 'num' }, t('table.cacheWrite')),
-                  h('th', { className: 'num' }, t('table.total')),
-                )),
-                h('tbody', null, rows.map((row) => h('tr', { key: row.key },
-                  h('td', null, row.key),
-                  h('td', { className: 'num' }, fmt.int(row.requests)),
-                  h('td', { className: 'num' }, fmt.int(row.inputTokens)),
-                  h('td', { className: 'num' }, fmt.int(row.outputTokens)),
-                  h('td', { className: 'num' }, fmt.int(row.cacheReadTokens)),
-                  h('td', { className: 'num' }, fmt.int(row.cacheWriteTokens)),
-                  h('td', { className: 'num' }, fmt.compact(row.totalTokens)),
-                ))),
-              ),
+            h('span', { className: 'duc-small duc-muted' }, t('costs.pending')),
+          ),
+          h('div', { className: 'duc-tablewrap' },
+            h('table', { className: 'duc-table' },
+              h('thead', null, h('tr', null,
+                h('th', null, t('table.model')),
+                h('th', { className: 'num' }, t('table.requests')),
+                h('th', { className: 'num' }, t('table.input')),
+                h('th', { className: 'num' }, t('table.output')),
+                h('th', { className: 'num' }, t('table.cacheRead')),
+                h('th', { className: 'num' }, t('table.cacheWrite')),
+                h('th', { className: 'num' }, t('table.total')),
+              )),
+              h('tbody', null, rows.map((row) => h('tr', { key: row.key },
+                h('td', null, row.key),
+                h('td', { className: 'num' }, fmt.int(row.requests)),
+                h('td', { className: 'num' }, fmt.int(row.inputTokens)),
+                h('td', { className: 'num' }, fmt.int(row.outputTokens)),
+                h('td', { className: 'num' }, fmt.int(row.cacheReadTokens)),
+                h('td', { className: 'num' }, fmt.int(row.cacheWriteTokens)),
+                h('td', { className: 'num' }, fmt.compact(row.totalTokens)),
+              ))),
             ),
           ),
         ),
@@ -771,10 +753,7 @@ select.duc-input{min-width:100px}
     }
 
     function ContextTab({ t }) {
-      return h('div', { className: 'duc-section' },
-        h('h3', { className: 'duc-section-title' }, t('context.notice.title')),
-        h('p', { className: 'duc-note duc-warn', style: { marginTop: 0 } }, t('context.notice.body')),
-      );
+      return h('div', { className: 'duc-state' }, t('context.pending'));
     }
 
     // -------------------------------------------------------------- dashboard

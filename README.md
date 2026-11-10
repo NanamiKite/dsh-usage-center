@@ -72,4 +72,4 @@ node scripts/render-client.mjs      # 客户端组件树渲染驱动（改 clien
 
 ## License
 
-MIT
+GPL-3.0-or-later，见 [LICENSE](LICENSE)。
