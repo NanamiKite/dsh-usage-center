@@ -18,6 +18,7 @@ node scripts/render-client.mjs      # 客户端组件树渲染驱动（改 clien
 ## 安装与热更（宿主的模块代规则）
 
 - `plugin_manager` 的 `install_bundle` 安装本地目录（link 方式，源码即运行码）
+- **仓库地址安装依赖已提交的 `lib/`**：宿主把 git URL 交给 pnpm 克隆打包，入口是 `main: lib/index.js`；`lib/` 不在仓库里就会报 "cannot find module"。且宿主供应链策略默认拦截安装期构建脚本，`prepare` 兜底不可靠——发布前先 `pnpm build` 再提交
 - **替换已安装的包后必须重启 DSH**：宿主按"模块代"加载插件代码，重装+刷新页面拿到的仍可能是旧前端。改完代码：重装 → 重启 → 实机确认
 - 冷启动顺序不可假设：可选服务的注册一律走声明式注入（见下）
 
