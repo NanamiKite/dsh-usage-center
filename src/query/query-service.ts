@@ -168,16 +168,16 @@ export class QueryService {
   // -------------------------------------------------------------------------
   // Context monitor.
 
-  /** Latest context state per session, or one session's sample series. */
+  /** Per-session observation aggregates, or one session's observation series. */
   context(sessionId?: string): {
-    sessions?: ReturnType<UsageDatabase['contextSessions']>;
+    sessions?: ReturnType<UsageDatabase['contextOverview']>;
     sessionId?: string;
-    samples?: ReturnType<UsageDatabase['contextSamples']>;
+    observations?: ReturnType<UsageDatabase['contextObservations']>;
   } {
     if (sessionId !== undefined && sessionId.length > 0) {
-      return { sessionId, samples: this.store.contextSamples(sessionId) };
+      return { sessionId, observations: this.store.contextObservations(sessionId) };
     }
-    return { sessions: this.store.contextSessions() };
+    return { sessions: this.store.contextOverview() };
   }
 
   /** Compact multi-line usage summary (slash command / agent tool). */
@@ -186,19 +186,22 @@ export class QueryService {
       new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
     const lines: string[] = [];
     if (scope === 'context') {
-      const rows = this.store.contextSessions().slice(0, 8);
-      lines.push('context monitor (latest per session):');
+      const rows = this.store.contextOverview().slice(0, 8);
+      lines.push('context observations (per session, latest first):');
       for (const row of rows) {
-        const pct = row.contextTokens !== null && row.contextWindow
-          ? ` (${Math.round((row.contextTokens / row.contextWindow) * 100)}% of ${compact(row.contextWindow)})`
+        const window = row.lastInput !== null && row.contextWindow !== null
+          ? ` of ${compact(row.contextWindow)} (${Math.round((row.lastInput / row.contextWindow) * 100)}%)`
           : '';
+        const delta = row.delta === null ? '' : row.delta >= 0 ? ` (+${compact(row.delta)})` : ` (${compact(row.delta)})`;
         lines.push(
-          `- ${row.sessionId.slice(0, 16)}… ${row.provider ?? '?'}/${row.model ?? '?'}: ` +
-            `${row.contextTokens === null ? 'unknown' : compact(row.contextTokens)} tokens${pct}` +
+          `- ${(row.title ?? row.sessionId.slice(0, 16)).slice(0, 40)} ${row.model ?? '?'}: ` +
+            `last input ${row.lastInput === null ? 'unknown' : compact(row.lastInput)}${window}${delta}` +
+            ` · max ${row.maxInput === null ? '?' : compact(row.maxInput)}` +
+            ` · ${row.observedRequests} observed / ${row.totalRequests} requests` +
             (row.compactions > 0 ? ` · ${row.compactions} compaction(s)` : ''),
         );
       }
-      if (rows.length === 0) lines.push('- no context samples yet');
+      if (rows.length === 0) lines.push('- no observations yet');
       return lines.join('\n');
     }
     const summary = this.summary();

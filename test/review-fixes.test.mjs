@@ -55,26 +55,23 @@ test('metadata-only corrections are not swallowed by the idempotence check', () 
   db.close();
 });
 
-test('context watermark follows amendments of the same request only', () => {
+test('context observations follow ledger amendments (derived cache converges)', () => {
   const db = new UsageDatabase(':memory:');
   db.upsertContextSample({ sessionId: 's1', seq: 5, timestamp: 1, provider: 'glm', model: 'glm-5.3', contextWindow: 1000 });
-  const a = record({ requestId: 's1:10', seq: 10, inputTokens: 100 });
-  db.upsertRecord(a);
-  db.fillContextTokens(a);
-  let sample = db.contextSamples('s1')[0];
-  assert.equal(sample.contextTokens, 100);
-  // Amend the same record: the derived watermark must converge.
-  const amended = record({ requestId: 's1:10', seq: 10, inputTokens: 200 });
-  db.upsertRecord(amended);
-  db.fillContextTokens(amended);
-  sample = db.contextSamples('s1')[0];
-  assert.equal(sample.contextTokens, 200, 'same-request amendment propagates');
-  // A different request later in the log must NOT steal the attribution.
-  const b = record({ requestId: 's1:20', seq: 20, inputTokens: 900 });
-  db.upsertRecord(b);
-  db.fillContextTokens(b);
-  sample = db.contextSamples('s1')[0];
-  assert.equal(sample.contextTokens, 200, 'other-request fill does not overwrite');
+  db.upsertRecord(record({ requestId: 's1:10', seq: 10, inputTokens: 100, cacheReadTokens: 0 }));
+  let rows = db.contextObservations('s1');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].inputTokens, 100);
+  assert.equal(rows[0].contextWindow, 1000);
+  // Amend the same record: the derived observation must converge.
+  db.upsertRecord(record({ requestId: 's1:10', seq: 10, inputTokens: 200, cacheReadTokens: 0 }));
+  rows = db.contextObservations('s1');
+  assert.equal(rows[0].inputTokens, 200, 'amendment propagates into the observation');
+  // A later record adds its OWN observation; attribution never overlaps.
+  db.upsertRecord(record({ requestId: 's1:20', seq: 20, inputTokens: 900, cacheReadTokens: 0 }));
+  rows = db.contextObservations('s1');
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.inputTokens), [200, 900]);
   db.close();
 });
 

@@ -14,7 +14,7 @@
 | `/sessions` | GET | `limit` `offset` | 逐会话台账汇总（上限 200/页） |
 | `/prices` | GET | — | 已同步的价格表 |
 | `/costs` | GET | `from` `to` `sessionId` `provider` `model` `kind` | 估算费用（按币种/模型/天 + 覆盖率） |
-| `/context` | GET | `sessionId`（可选） | 各会话上下文水位；带 sessionId 时返回逐请求序列 |
+| `/context` | GET | `sessionId`（可选） | 各会话输入观测汇总（最近输入/增减/历史最大/观测数/压缩/窗口）；带 sessionId 时返回逐请求观测序列 |
 | `/export` | GET | `what=records\|costs\|sessions` `format=csv\|json` 及明细筛选 | 文件下载（CSV 带 UTF-8 BOM） |
 | `/report/reconcile` | GET | — | 账本 vs 会话日志对账报告（全量重读，秒级） |
 | `/prices/suggest` | POST | — | 拉取 OpenRouter 公开价，返回匹配建议；不改任何状态 |

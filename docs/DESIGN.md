@@ -35,12 +35,13 @@ SQLite（`node:sqlite`，无原生依赖），默认 `$DSH_HOME/dsh-usage-center
 | `usage_records` | 每次 LLM 调用一条；主键 `request_id`；timestamp / session / model / kind 建索引 |
 | `sessions` | 会话元数据（含 `title`）与导入水位（`last_seq`） |
 | `daily_stats` | 派生日聚合；主键 `(day, provider, model)`；day 为本地日历日 |
-| `context_samples` | 每请求上下文采样；主键 `(session_id, seq)`；水位回填见"上下文监控" |
+| `context_samples` | 窗口声明流（每个 `request/context` 事件一行：seq + contextWindow + 模型元数据） |
+| `context_observations` | 派生逐请求观测（schema v6）：每条有输入用量的请求一行 + 压缩标记行；`missing_mask` 记录缺失类别，窗口按声明顺序关联 |
 | `price_lists` / `prices` | 从配置同步的版本化价格表，按内容哈希去重 |
 | `cost_entries` | 派生费用缓存；主键 `request_id`，每请求一行，四类 token 各一列整数微货币单位 + `missing_mask` |
 | `meta` | schema 版本与聚合戳 |
 
-防护：`PRAGMA application_id`（`'dshu'`）拒绝打开无关数据库；`user_version` 驱动步进迁移（当前 v5），遇到更新的 schema 版本拒绝打开。
+防护：`PRAGMA application_id`（`'dshu'`）拒绝打开无关数据库；`user_version` 驱动步进迁移（当前 v6：v4 窗口声明表，v5 会话标题，v6 观测派生表），遇到更新的 schema 版本拒绝打开。
 
 ### 派生缓存的维护（daily_stats / cost_entries 共用模式）
 
@@ -70,11 +71,16 @@ QueryService 是唯一统计出口，HTTP API 与 Web 面板都不自行计算�
 - 费用视图在聚合中附上最新生效价格表的单价（含通配 provider 条目），表格呈现 输入/输出/缓存读三列单价 × 用量 → 费用。
 - 参考价导入是配置的便捷入口而非独立价格来源：匹配、确认、写入的完整流程见[配置说明](CONFIGURATION.md)；匹配器为 `domain/openrouter.ts` 纯函数（完整 id 相等 > 精确命名空间 > 账号限定名取首段 > 尾段一致 > 近似包含；同排名取更短 id）。
 
-## 上下文监控
+## 上下文观测（逐请求输入趋势）
 
-`request/context` 事件写入 `context_samples`（主键 session+seq）。上下文水位是派生值：某请求之后第一条带 usage 的记录，其 input+cacheRead+cacheWrite 即喂给模型的上下文，回填到该会话所有尚未回填且 seq 更小的采样（同一逻辑请求的重试/尝试共享该值）。回填条件为 `context_tokens IS NULL OR request_id = 本记录`——账本修正后的重放也能收敛，且不抢占已归属其他请求的采样。会话级视图取每会话最新采样与历史峰值，压缩次数由 `kind='compaction'` 记录数得出。
+数据基础是**派生缓存** `context_observations`（schema v6，同 daily_stats 模式，从 `usage_records` × 窗口声明重建）：
 
-走势图刻度按数据峰值 ×1.1 定，窗口虚线只在 ≤2×峰值时按真实高度画出；窗口远大于数据时虚线贴图顶、标签带 `↑` 表示在图示范围之上，标签始终钳制在绘图区内。会话在界面显示名称，回退顺序：`sessions.title` > 工作区目录名 > 会话 id 前 16 位；台账按谱系把子代理归入父会话并可展开。
+- **采样规则**：每条有输入用量（input/cacheRead/cacheWrite 任一非空）的请求产生一个观测点；压缩调用（`kind='compaction'`）即使无用量也保留为标记行；完全无用量的普通请求不产生观测。`missing_mask` 标记缺失类别（bit1 input / bit2 cacheRead / bit4 cacheWrite），缺失不冒充 0。
+- **窗口关联**：`request/context` 声明只提供窗口与模型元数据，按事件顺序（声明 seq ≤ 记录 seq 的最近一条）关联到请求；首条声明之前的请求窗口未知（NULL），不用未来声明回填历史。
+- **一致性**：观测不入采集写路径——实时与历史重放都只写账本，观测从账本派生，天然一致；用量修正后重建即收敛。脏检测三通道：进程内记录写标记 + 声明修订号 + `MAX(updated_at)` 戳。
+- 总览聚合（`contextOverview`）：每会话最近输入/上次输入/增减（含模型切换标记）/历史最大输入/观测数/压缩数/窗口；无观测但有记录的会话保留并提示。
+
+界面按此回答三个问题：最近一次请求实际送入多少、何时明显增长、压缩发生了什么。“窗口占比”是辅助信息，界面明确标注窗口差额不是可安全使用的输入预算；不做压缩阈值预测。走势图（MVP）按观测顺序画输入折线；压缩诊断（前后差额、区段窗口、分层显示）见后续阶段。会话名回退顺序：`sessions.title` > 工作区目录名 > id 前 16 位；台账与上下文列表都按谱系把子代理归入父会话并可展开。
 
 ## 对账
 

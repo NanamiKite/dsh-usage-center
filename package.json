@@ -1,6 +1,6 @@
 {
   "name": "dsh-usage-center",
-  "version": "0.6.6",
+  "version": "0.7.0",
   "private": true,
   "description": "Unified LLM usage statistics, request analytics, cost tracking and token ledger for DeepSeek Harness",
   "type": "module",

@@ -132,14 +132,21 @@ window.__ModuleLoader__.load({
       'suggest.cancel': '取消',
       'context.pending': '上下文监控尚未提供',
       'context.window': '窗口',
-      'context.usage': '水位',
-      'context.peak': '峰值',
-      'context.remaining': '剩余',
       'context.compactions': '压缩',
       'context.back': '返回',
       'context.series': '上下文走势',
       'context.latest': '最新会话',
       'context.selected': '所选会话',
+      'context.lastInput': '最近输入',
+      'context.delta': '较上次',
+      'context.prev': '上次',
+      'context.maxInput': '历史最大输入',
+      'context.modelSwitched': '期间切换过模型',
+      'context.ofWindow': '占窗口',
+      'context.noWindow': '窗口未知（无声明）',
+      'context.windowNote': '窗口差额 ≠ 可安全使用的输入预算',
+      'context.observed': '观测/请求',
+      'context.noUsage': '无可观测用量',
       'ledger.subagents': '子代理',
       'ledger.expand': '展开/收起子代理',
       'ledger.capped': '会话超过 200，仅显示前 {n} 个',
@@ -249,14 +256,21 @@ window.__ModuleLoader__.load({
       'suggest.cancel': 'Cancel',
       'context.pending': 'Context monitor is not available yet',
       'context.window': 'Window',
-      'context.usage': 'Watermark',
-      'context.peak': 'Peak',
-      'context.remaining': 'Remaining',
       'context.compactions': 'Compactions',
       'context.back': 'Back',
       'context.series': 'Context series',
       'context.latest': 'Latest session',
       'context.selected': 'Selected session',
+      'context.lastInput': 'Last input',
+      'context.delta': 'vs previous',
+      'context.prev': 'Previous',
+      'context.maxInput': 'Max input',
+      'context.modelSwitched': 'model changed in between',
+      'context.ofWindow': 'of window',
+      'context.noWindow': 'Window unknown (no declaration)',
+      'context.windowNote': 'window headroom is not a safe input budget',
+      'context.observed': 'observed/requests',
+      'context.noUsage': 'no observable usage',
       'ledger.subagents': 'sub-agents',
       'ledger.expand': 'Expand/collapse sub-agents',
       'ledger.capped': 'More than 200 sessions; showing first {n}',
@@ -1338,64 +1352,64 @@ select.duc-input{min-width:100px}
     }
 
     function ContextTab({ t, fmt }) {
-      // `selected` carries the clicked session row so the detail view can show
-      // its stat cards without a second round-trip ("click a row, see that
-      // row" — the overview cards stay bound to the latest session).
+      // Phase 2: overview is a session tree with ABSOLUTE input numbers (no
+      // "random latest session" cards); selecting a row pins the metric row
+      // and the trend to that session. Core questions answered: how much went
+      // in on the last request, how it changed, the historical max — the
+      // window ratio stays secondary and is never a "remaining budget".
       const [selected, setSelected] = useState(null);
+      const [expanded, setExpanded] = useState({});
       const overview = useLoad(
         () => [['ctx', selected === null ? api('/context') : Promise.resolve({})]],
         [selected === null],
       );
       const detail = useLoad(
-        () => [['d', selected !== null ? api('/context', { sessionId: selected.sessionId }) : Promise.resolve({ samples: [] })]],
+        () => [['d', selected !== null ? api('/context', { sessionId: selected.sessionId }) : Promise.resolve({})]],
         [selected],
       );
-      const waterCards = (row) => {
-        const pct = row.contextTokens !== null && row.contextWindow
-          ? row.contextTokens / row.contextWindow
-          : null;
-        return [
-          h(StatCard, {
-            key: 'usage',
-            title: t('context.usage'),
-            value: pct === null ? '–' : `${(pct * 100).toFixed(0)}%`,
-            sub: row.contextTokens === null || row.contextWindow === null
-              ? undefined
-              : `${fmt.compact(row.contextTokens)} / ${fmt.compact(row.contextWindow)}`,
-          }),
-          h(StatCard, {
-            key: 'remaining',
-            title: t('context.remaining'),
-            value: pct === null
-              ? '–'
-              : fmt.compact(Math.max(row.contextWindow - (row.contextTokens ?? 0), 0)),
-            sub: `${t('context.window')} ${row.contextWindow === null ? '–' : fmt.compact(row.contextWindow)}`,
-          }),
-          h(StatCard, {
-            key: 'peak',
-            title: t('context.peak'),
-            value: row.peakTokens === null ? '–' : fmt.compact(row.peakTokens),
-            sub: `${fmt.int(row.requests)} ${t('chart.requestsUnit')}`,
-          }),
-          h(StatCard, {
-            key: 'compactions',
-            title: t('context.compactions'),
-            value: fmt.int(row.compactions),
-          }),
-        ];
-      };
+
       if (selected !== null) {
-        const samples = detail.data?.d?.samples ?? [];
-        const windowTokens = samples.length > 0
-          ? samples.reduce((max, s) => Math.max(max, s.contextWindow ?? 0), 0)
+        const row = selected.row;
+        const observations = (detail.data?.d?.observations ?? [])
+          .filter((o) => o.kind === 'chat' && o.inputTokens !== null);
+        const chartSamples = observations.map((o) => ({ seq: o.seq, contextTokens: o.inputTokens }));
+        const windowTokens = observations.length > 0
+          ? observations[observations.length - 1].contextWindow
           : null;
+        const ratio = row.lastInput !== null && row.contextWindow !== null
+          ? row.lastInput / row.contextWindow : null;
         return h(StateView, {
           loading: detail.loading, error: detail.error,
-          empty: !detail.loading && samples.length === 0, onRetry: detail.refresh, t,
+          empty: !detail.loading && observations.length === 0, onRetry: detail.refresh, t,
         },
           h('div', { className: 'duc-small duc-muted', style: { marginBottom: 8 } },
-            `${t('context.selected')} · ${sessionName(selected.row)}`),
-          h('div', { className: 'duc-grid' }, waterCards(selected.row)),
+            `${t('context.selected')} · ${sessionName(row)}`),
+          h('div', { className: 'duc-grid' },
+            h(StatCard, {
+              title: t('context.lastInput'),
+              value: row.lastInput === null ? '–' : fmt.compact(row.lastInput),
+              sub: row.lastInputAt === null ? undefined : fmt.dateTime(row.lastInputAt),
+            }),
+            h(StatCard, {
+              title: t('context.delta'),
+              value: row.delta === null ? '–' : `${row.delta >= 0 ? '+' : ''}${fmt.compact(row.delta)}`,
+              sub: row.modelSwitched ? t('context.modelSwitched')
+                : row.prevInput === null ? undefined : `${t('context.prev')} ${fmt.compact(row.prevInput)}`,
+            }),
+            h(StatCard, {
+              title: t('context.maxInput'),
+              value: row.maxInput === null ? '–' : fmt.compact(row.maxInput),
+              sub: `${fmt.int(row.observedRequests)} / ${fmt.int(row.totalRequests)} ${t('chart.requestsUnit')}`,
+            }),
+            h(StatCard, {
+              title: t('context.compactions'),
+              value: fmt.int(row.compactions),
+            }),
+          ),
+          h('div', { className: 'duc-small duc-muted', style: { marginBottom: 12 } },
+            row.contextWindow === null
+              ? t('context.noWindow')
+              : `${t('context.window')} ${fmt.compact(row.contextWindow)}${ratio === null ? '' : ` · ${t('context.ofWindow')} ${(ratio * 100).toFixed(0)}%`} · ${t('context.windowNote')}`),
           h('div', { className: 'duc-section' },
             h('div', { className: 'duc-section-head' },
               h('h3', { className: 'duc-section-title' }, t('context.series')),
@@ -1404,63 +1418,93 @@ select.duc-input{min-width:100px}
                 onClick: () => setSelected(null),
               }, `← ${t('context.back')}`),
             ),
-            h(ContextChart, { samples, windowTokens, t, fmt }),
+            chartSamples.length > 0
+              ? h(ContextChart, { samples: chartSamples, windowTokens, t, fmt })
+              : h('div', { className: 'duc-state' }, t('context.noUsage')),
           ),
         );
       }
+
       const sessions = overview.data?.ctx?.sessions ?? [];
-      const latest = sessions[0];
+      const known = new Set(sessions.map((s) => s.sessionId));
+      const byParent = new Map();
+      for (const s of sessions) {
+        if (s.parentSessionId === null || s.parentSessionId === undefined) continue;
+        if (!known.has(s.parentSessionId)) continue;
+        const list = byParent.get(s.parentSessionId) ?? [];
+        list.push(s);
+        byParent.set(s.parentSessionId, list);
+      }
+      const roots = sessions.filter(
+        (s) => s.parentSessionId === null || s.parentSessionId === undefined || !known.has(s.parentSessionId),
+      );
+      const deltaCell = (s) => {
+        if (s.delta === null) return '–';
+        return h('span', null,
+          `${s.delta >= 0 ? '+' : ''}${fmt.compact(s.delta)}`,
+          s.modelSwitched ? h('span', { className: 'duc-badge', style: { marginLeft: 6 } }, '⇄') : null,
+        );
+      };
+      const renderRow = (s, depth) => {
+        const kids = byParent.get(s.sessionId) ?? [];
+        const isOpen = expanded[s.sessionId] === true;
+        const ratio = s.lastInput !== null && s.contextWindow !== null
+          ? `${Math.round((s.lastInput / s.contextWindow) * 100)}%` : null;
+        const rows = [h('tr', {
+          key: s.sessionId, className: 'clickable',
+          title: `${s.sessionId}${s.delta !== null ? `\n${t('context.prev')}: ${s.prevInput} → ${t('context.lastInput')}: ${s.lastInput}` : ''}`,
+          onClick: () => setSelected({ sessionId: s.sessionId, row: s }),
+        },
+          h('td', null,
+            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, paddingLeft: depth * 18 } },
+              kids.length > 0
+                ? h('button', {
+                  type: 'button', className: 'duc-expander', 'aria-expanded': String(isOpen),
+                  'aria-label': t('ledger.expand'),
+                  onClick: (e) => {
+                    e?.stopPropagation?.();
+                    setExpanded((prev) => ({ ...prev, [s.sessionId]: !(prev[s.sessionId] === true) }));
+                  },
+                }, isOpen ? '▾' : '▸')
+                : h('span', { style: { display: 'inline-block', width: 14 }, 'aria-hidden': 'true' }),
+              h('span', null, sessionName(s)),
+              s.origin === 'subagent' ? h('span', { className: 'duc-badge' }, t('origin.subagent')) : null,
+              s.observedRequests === 0 && s.totalRequests > 0
+                ? h('span', { className: 'duc-badge' }, t('context.noUsage')) : null,
+            )),
+          h('td', null, s.model ?? '–'),
+          h('td', { className: 'num' }, s.lastInput === null ? '–' : fmt.compact(s.lastInput)),
+          h('td', { className: 'num' }, deltaCell(s)),
+          h('td', { className: 'num' }, ratio === null ? '–' : ratio),
+          h('td', { className: 'num' }, s.contextWindow === null ? '–' : fmt.compact(s.contextWindow)),
+          h('td', { className: 'num' }, s.compactions > 0 ? fmt.int(s.compactions) : '–'),
+          h('td', { className: 'num' }, `${fmt.int(s.observedRequests)}/${fmt.int(s.totalRequests)}`),
+          h('td', null, s.lastObsAt === null ? '–' : fmt.dateTime(s.lastObsAt)),
+          h('td', { className: 'duc-muted', 'aria-hidden': 'true' }, '›'),
+        )];
+        if (isOpen) for (const kid of kids) rows.push(...renderRow(kid, depth + 1));
+        return rows;
+      };
       return h(StateView, {
         loading: overview.loading, error: overview.error,
         empty: !overview.loading && sessions.length === 0, onRetry: overview.refresh, t,
       },
-        latest !== undefined
-          ? h('div', null,
-              h('div', { className: 'duc-small duc-muted', style: { marginBottom: 8 } },
-                `${t('context.latest')} · ${sessionName(latest)}`),
-              h('div', { className: 'duc-grid' }, waterCards(latest)),
-            )
-          : null,
         h('div', { className: 'duc-section' },
           h('div', { className: 'duc-tablewrap' },
             h('table', { className: 'duc-table' },
               h('thead', null, h('tr', null,
                 h('th', null, t('table.session')),
                 h('th', null, t('table.model')),
-                h('th', null, t('context.usage')),
-                h('th', { className: 'num' }, t('context.peak')),
+                h('th', { className: 'num' }, t('context.lastInput')),
+                h('th', { className: 'num' }, t('context.delta')),
+                h('th', { className: 'num' }, t('context.ofWindow')),
                 h('th', { className: 'num' }, t('context.window')),
                 h('th', { className: 'num' }, t('context.compactions')),
+                h('th', { className: 'num' }, t('context.observed')),
                 h('th', null, t('table.updated')),
                 h('th', { 'aria-hidden': 'true' }),
               )),
-              h('tbody', null, sessions.map((s) => {
-                const pct = s.contextTokens !== null && s.contextWindow
-                  ? Math.min(100, Math.round((s.contextTokens / s.contextWindow) * 100))
-                  : null;
-                return h('tr', {
-                  key: s.sessionId, className: 'clickable',
-                  title: s.sessionId,
-                  onClick: () => setSelected({ sessionId: s.sessionId, row: s }),
-                },
-                  h('td', null,
-                    h('span', null, sessionName(s)),
-                    ' ',
-                    h('span', { className: 'duc-badge' },
-                      s.origin === 'subagent' ? t('origin.subagent') : s.origin === null ? '' : s.origin),
-                  ),
-                  h('td', null, `${s.provider ?? '?'} / ${s.model ?? '?'}`),
-                  h('td', null, pct === null ? '–' : h('span', null,
-                    h('span', { className: 'duc-bar' }, h('i', { style: { width: `${pct}%` } })),
-                    ' ', `${pct}%`,
-                  )),
-                  h('td', { className: 'num' }, s.peakTokens === null ? '–' : fmt.compact(s.peakTokens)),
-                  h('td', { className: 'num' }, s.contextWindow === null ? '–' : fmt.compact(s.contextWindow)),
-                  h('td', { className: 'num' }, s.compactions > 0 ? fmt.int(s.compactions) : '–'),
-                  h('td', null, fmt.dateTime(s.timestamp)),
-                  h('td', { className: 'duc-muted', 'aria-hidden': 'true' }, '›'),
-                );
-              })),
+              h('tbody', null, roots.flatMap((s) => renderRow(s, 0))),
             ),
           ),
         ),

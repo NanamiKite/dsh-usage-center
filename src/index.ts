@@ -166,10 +166,9 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
     const sink: RecordSink = {
       writeRecord(record: UsageRecord): UpsertOutcome {
         const outcome = store.upsertRecord(record);
-        // Always try to fill: on replays the UPDATE matches no open samples
-        // (cheap no-op), while gating on the outcome would leave historical
-        // sessions unfilled forever.
-        store.fillContextTokens(record);
+        // Context observations are DERIVED from the ledger (schema v6): no
+        // per-write fill needed — the cache rebuilds from records × window
+        // declarations, so live and replay converge by construction.
         return outcome;
       },
       writeSessionRow(row: SessionRow): void {
@@ -675,11 +674,11 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
               view: {
                 type: 'string',
                 enum: ['summary', 'today', 'models', 'context'],
-                description: 'Which view to return. "context" with sessionId returns that session\'s context samples.',
+                description: 'Which view to return. "context" returns per-session input observations (last input, delta, max, window); with sessionId, that session\'s per-request observation series.',
               },
               sessionId: {
                 type: 'string',
-                description: 'Optional session id; used by view "context" for the per-session series.',
+                description: 'Optional session id; used by view "context" for the per-session observation series.',
               },
             },
             additionalProperties: false,

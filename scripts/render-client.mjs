@@ -86,22 +86,24 @@ function payloadFor(path) {
     if (path.includes('sessionId=')) {
       return {
         sessionId: 'session-x-1234567890',
-        samples: Array.from({ length: 12 }, (_, i) => ({
+        observations: Array.from({ length: 12 }, (_, i) => ({
+          requestId: `session-x-1234567890:${10 + i * 7}`,
           seq: 10 + i * 7,
           timestamp: 1794280000000 + i * 60_000,
-          provider: 'glm', model: 'glm-5.3',
-          contextTokens: 20_000 + i * 9_000,
-          contextWindow: 1_000_000,
-          requestId: `s:${i}`,
+          provider: 'glm', model: 'glm-5.3', kind: 'chat',
+          inputTokens: 20_000 + i * 9_000,
+          missingMask: 0, contextWindow: 1_000_000,
         })),
       };
     }
     return {
       sessions: [{
         sessionId: 'session-x-1234567890', title: 'Verify dashboard rendering', origin: null, parentSessionId: null,
-        provider: 'glm', model: 'glm-5.3',
-        contextTokens: 119_000, peakTokens: 190_000, contextWindow: 1_000_000,
-        timestamp: 1794280000000, compactions: 1, requests: 42,
+        model: 'glm-5.3',
+        lastInput: 119_000, lastInputAt: 1794280000000, lastRequestId: 'session-x-1234567890:87',
+        prevInput: 90_000, delta: 29_000, modelSwitched: false,
+        maxInput: 190_000, observedRequests: 40, totalRequests: 42,
+        compactions: 1, contextWindow: 1_000_000, lastObsAt: 1794280000000,
       }],
     };
   }
@@ -429,11 +431,11 @@ assert.equal(importedBody.models[0].model, 'glm-5.3');
 assert.equal(importedBody.models[0].cacheWrite, 0.7);
 assert.match(textOf(tree), /参考价已写入配置/, 'imported notice rendered');
 
-// Context monitor: sessions table (with title), drill into the series view.
+// Context monitor: observation overview (absolute inputs + tree), drill in.
 await clickTab('上下文');
-assert.match(textOf(tree), /glm-5\.3/, 'context sessions rendered');
+assert.match(textOf(tree), /最近输入/, 'overview shows absolute last input');
 assert.match(textOf(tree), /Verify dashboard rendering/, 'session title rendered');
-assert.match(textOf(tree), /峰值/, 'peak column rendered');
+assert.match(textOf(tree), /占窗口/, 'window-ratio column present');
 const contextRow = collectNodes(tree).find((n) => n.tag === 'tr' && typeof n.props.onClick === 'function');
 assert.ok(contextRow !== undefined, 'context row clickable');
 contextRow.props.onClick();
@@ -441,8 +443,10 @@ dirty = true;
 await settle();
 tree = renderDashboard();
 assert.match(textOf(tree), /seq 10/, 'context series chart rendered');
-assert.match(textOf(tree), /所选会话/, 'detail water cards bound to the clicked session');
-assert.match(textOf(tree), /峰值/, 'detail cards show peak watermark');
+assert.match(textOf(tree), /所选会话/, 'detail metrics bound to the clicked session');
+assert.match(textOf(tree), /历史最大输入/, 'max-input metric rendered');
+assert.match(textOf(tree), /较上次/, 'delta metric rendered');
+assert.match(textOf(tree), /窗口差额/, 'window headroom disclaimer rendered');
 await clickTab('总览');
 
 // Trend dimension switch: provider view renders per-key legend.

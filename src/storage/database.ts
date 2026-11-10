@@ -44,7 +44,7 @@ import {
 
 /** 'dshu' -- dsh-usage-center's SQLite application id. */
 export const APPLICATION_ID = 0x6473_6875;
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 const CREATE_V1 = `
 CREATE TABLE IF NOT EXISTS usage_records (
@@ -193,6 +193,33 @@ CREATE INDEX IF NOT EXISTS idx_context_session ON context_samples (session_id, t
 /** v5: session titles (from `session/title` events) shown instead of raw ids. */
 const MIGRATE_V5 = 'ALTER TABLE sessions ADD COLUMN title TEXT;';
 
+/**
+ * v6: per-request context observations — a DERIVED cache (same pattern as
+ * daily_stats/cost_entries), rebuilt from usage_records × the window
+ * declarations in context_samples. One row per request that has any valid
+ * input usage (plus every compaction record as a marker, input nullable).
+ * `missing_mask` marks input-side categories that were NULL (bit 1 input,
+ * bit 2 cacheRead, bit 4 cacheWrite) so partial data is never read as exact.
+ * `context_window` is the declaration at/before this seq (order-based
+ * association; no future declaration ever backfills earlier requests).
+ */
+const CREATE_V6 = `
+CREATE TABLE IF NOT EXISTS context_observations (
+  request_id     TEXT PRIMARY KEY,
+  session_id     TEXT NOT NULL,
+  seq            INTEGER NOT NULL,
+  timestamp      INTEGER NOT NULL,
+  provider       TEXT,
+  model          TEXT,
+  kind           TEXT NOT NULL,
+  input_tokens   INTEGER,
+  missing_mask   INTEGER NOT NULL DEFAULT 0,
+  context_window INTEGER,
+  computed_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_context_obs_session ON context_observations (session_id, seq);
+`;
+
 const RECORD_COLUMNS = `
   request_id, session_id, seq, turn, step, parent_session_id, origin, is_seed,
   cwd, provider, model, kind, timestamp,
@@ -311,6 +338,10 @@ export class UsageDatabase {
       }
       version = 5;
     }
+    if (version < 6) {
+      this.db.exec(CREATE_V6);
+      version = 6;
+    }
     this.db.exec(`PRAGMA application_id = ${APPLICATION_ID};`);
     this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
     this.setMeta('schema_version', String(SCHEMA_VERSION));
@@ -347,6 +378,7 @@ export class UsageDatabase {
     if (existing === undefined) {
       this.pendingStatsWrites = true;
       this.pendingCostWrites = true;
+      this.pendingObsWrites = true;
       this.db
         .prepare(
           `INSERT INTO usage_records (
@@ -403,6 +435,7 @@ export class UsageDatabase {
     }
     this.pendingStatsWrites = true;
     this.pendingCostWrites = true;
+    this.pendingObsWrites = true;
     this.db
       .prepare(
         `UPDATE usage_records SET
@@ -468,6 +501,7 @@ export class UsageDatabase {
     if (purged.changes > 0) {
       this.pendingStatsWrites = true;
       this.pendingCostWrites = true;
+      this.pendingObsWrites = true;
     }
   }
 
@@ -1500,34 +1534,10 @@ export class UsageDatabase {
            context_window = COALESCE(excluded.context_window, context_samples.context_window)`,
       )
       .run(sample.sessionId, sample.seq, sample.timestamp, sample.provider, sample.model, sample.contextWindow);
-  }
-
-  /**
-   * Derive the context size of the request a usage record settled: its
-   * input + cacheRead + cacheWrite is the context the model was fed, and it
-   * is attributed to every still-open sample of the same session before this
-   * record (the retries/attempts of the same logical request). A record with
-   * no token data closes nothing.
-   */
-  fillContextTokens(record: UsageRecord): void {
-    const input = record.inputTokens;
-    const cacheRead = record.cacheReadTokens;
-    const cacheWrite = record.cacheWriteTokens;
-    if (input === null && cacheRead === null && cacheWrite === null) return;
-    const tokens =
-      (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0);
-    // Fill unfilled samples, and re-fill samples already attributed to THIS
-    // record: a later ledger amendment (e.g. usage corrected) must propagate
-    // into the derived watermark, or replay can never converge. Samples bound
-    // to a different request are never touched.
-    this.db
-      .prepare(
-        `UPDATE context_samples
-           SET context_tokens = ?, request_id = ?
-         WHERE session_id = ? AND seq < ?
-           AND (context_tokens IS NULL OR request_id = ?)`,
-      )
-      .run(tokens, record.requestId, record.sessionId, record.seq, record.requestId);
+    // A new/corrected window declaration changes the order-based window
+    // association of observations at/below its seq — mark the cache dirty.
+    this.pendingObsWrites = true;
+    this.setMeta(UsageDatabase.OBS_DECL_REV, String(this.declRevision() + 1));
   }
 
   /** Distinct (provider, model) pairs with request/token totals, busiest first. */
@@ -1556,66 +1566,294 @@ export class UsageDatabase {
     }));
   }
 
-  /** Latest + peak sample per session with lineage, title, and compactions. */
-  contextSessions(): Array<{
-    sessionId: string; title: string | null; origin: string | null; parentSessionId: string | null;
-    provider: string | null; model: string | null;
-    contextTokens: number | null; peakTokens: number | null; contextWindow: number | null;
-    timestamp: number; compactions: number; requests: number;
-  }> {
-    const rows = this.db
-      .prepare(
-        `SELECT cs.session_id, s.title, s.origin, s.parent_session_id, cs.provider, cs.model,
-                cs.context_tokens, cs.context_window, cs.timestamp,
-                (SELECT MAX(c2.context_tokens) FROM context_samples c2 WHERE c2.session_id = cs.session_id) AS peak_tokens,
-                (SELECT COUNT(*) FROM usage_records r
-                  WHERE r.session_id = cs.session_id AND r.kind = 'compaction') AS compactions,
-                (SELECT COUNT(*) FROM usage_records r WHERE r.session_id = cs.session_id) AS requests
-          FROM context_samples cs
-          JOIN sessions s ON s.session_id = cs.session_id
-          WHERE cs.seq = (SELECT MAX(seq) FROM context_samples c2 WHERE c2.session_id = cs.session_id)
-          ORDER BY cs.timestamp DESC`,
-      )
-      .all() as Array<Record<string, unknown>>;
-    const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
-    const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
-    return rows.map((row) => ({
-      sessionId: String(row.session_id),
-      title: typeof row.title === 'string' && row.title.length > 0 ? row.title : null,
-      origin: str(row.origin),
-      parentSessionId: str(row.parent_session_id),
-      provider: str(row.provider),
-      model: str(row.model),
-      contextTokens: num(row.context_tokens),
-      peakTokens: num(row.peak_tokens),
-      contextWindow: num(row.context_window),
-      timestamp: Number(row.timestamp),
-      compactions: Number(row.compactions ?? 0),
-      requests: Number(row.requests ?? 0),
-    }));
+  // ---- Context observations (derived, schema v6) ----
+  // `context_observations` is rebuilt from usage_records × the window
+  // declarations in context_samples. Sampling rule: one row per request with
+  // any valid input usage (input/cacheRead/cacheWrite), plus every compaction
+  // record as a marker even without usage. Windows associate by event order —
+  // the latest declaration at/before the record's seq — and never backfill.
+
+  private static readonly OBS_STAMP = 'observations_stamp';
+  private static readonly OBS_DECL_REV = 'context_decl_rev';
+  private pendingObsWrites = false;
+  private lastObsRebuildAt = 0;
+
+  private declRevision(): number {
+    return Number(this.getMeta(UsageDatabase.OBS_DECL_REV) ?? '0');
   }
 
-  /** Filled samples of one session, ascending (chart series). */
-  contextSamples(sessionId: string): Array<{
-    seq: number; timestamp: number; provider: string | null; model: string | null;
-    contextTokens: number; contextWindow: number | null; requestId: string | null;
+  observationsDirty(): boolean {
+    if (this.pendingObsWrites) return true;
+    const stamp = this.getMeta(UsageDatabase.OBS_STAMP);
+    const covered = stamp !== null ? Number(stamp) : NaN;
+    const current = this.maxUpdatedAt();
+    if (!Number.isFinite(covered)) {
+      if (current > 0) return true;
+    } else if (current > covered) {
+      return true;
+    }
+    return this.declRevision() > Number(this.getMeta('observations_decl_covered') ?? '0');
+  }
+
+  /**
+   * Pure derivation of observation rows (no writes) — shared by the rebuild
+   * and read-only consumers like the CLI.
+   */
+  deriveObservationRows(): Array<{
+    requestId: string; sessionId: string; seq: number; timestamp: number;
+    provider: string | null; model: string | null; kind: string;
+    inputTokens: number | null; missingMask: number; contextWindow: number | null;
   }> {
+    interface RecordRow {
+      request_id: string; session_id: string; seq: number; timestamp: number;
+      provider: string | null; model: string | null; kind: string;
+      input_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null;
+    }
+    interface DeclRow { session_id: string; seq: number; context_window: number }
+    const records = this.db
+      .prepare(
+        `SELECT request_id, session_id, seq, timestamp, provider, model, kind,
+                input_tokens, cache_read_tokens, cache_write_tokens
+           FROM usage_records ORDER BY session_id, seq`,
+      )
+      .all() as unknown as RecordRow[];
+    const decls = this.db
+      .prepare(
+        `SELECT session_id, seq, context_window FROM context_samples
+          WHERE context_window IS NOT NULL ORDER BY session_id, seq`,
+      )
+      .all() as unknown as DeclRow[];
+    const declsBySession = new Map<string, DeclRow[]>();
+    for (const decl of decls) {
+      const list = declsBySession.get(decl.session_id) ?? [];
+      list.push(decl);
+      declsBySession.set(decl.session_id, list);
+    }
+    const out: Array<{
+      requestId: string; sessionId: string; seq: number; timestamp: number;
+      provider: string | null; model: string | null; kind: string;
+      inputTokens: number | null; missingMask: number; contextWindow: number | null;
+    }> = [];
+    let currentSession = '';
+    let windowList: DeclRow[] = [];
+    let windowIdx = 0;
+    let carried: DeclRow | undefined;
+    for (const record of records) {
+      if (record.session_id !== currentSession) {
+        currentSession = record.session_id;
+        windowList = declsBySession.get(currentSession) ?? [];
+        windowIdx = 0;
+        carried = undefined;
+      }
+      for (;;) {
+        const next = windowList[windowIdx];
+        if (next === undefined || next.seq > record.seq) break;
+        carried = next;
+        windowIdx += 1;
+      }
+      const contextWindow = carried === undefined ? null : carried.context_window;
+      const input = record.input_tokens;
+      const cacheRead = record.cache_read_tokens;
+      const cacheWrite = record.cache_write_tokens;
+      const hasUsage = input !== null || cacheRead !== null || cacheWrite !== null;
+      if (record.kind !== 'compaction' && !hasUsage) continue;
+      let inputTokens: number | null = null;
+      let missingMask = 0;
+      if (hasUsage) {
+        inputTokens = (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0);
+        if (input === null) missingMask |= 1;
+        if (cacheRead === null) missingMask |= 2;
+        if (cacheWrite === null) missingMask |= 4;
+      }
+      out.push({
+        requestId: record.request_id,
+        sessionId: record.session_id,
+        seq: Number(record.seq),
+        timestamp: Number(record.timestamp),
+        provider: record.provider,
+        model: record.model,
+        kind: record.kind,
+        inputTokens,
+        missingMask,
+        contextWindow,
+      });
+    }
+    return out;
+  }
+
+  /** Full recompute of `context_observations` in one transaction. */
+  rebuildContextObservations(): number {
+    const rows = this.deriveObservationRows();
+    const stamp = this.maxUpdatedAt();
+    const declRev = this.declRevision();
+    const insert = this.db.prepare(
+      `INSERT INTO context_observations (
+         request_id, session_id, seq, timestamp, provider, model, kind,
+         input_tokens, missing_mask, context_window, computed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const ts = Date.now();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec('DELETE FROM context_observations');
+      for (const row of rows) {
+        insert.run(
+          row.requestId, row.sessionId, row.seq, row.timestamp, row.provider,
+          row.model, row.kind, row.inputTokens, row.missingMask, row.contextWindow, ts,
+        );
+      }
+      this.setMeta(UsageDatabase.OBS_STAMP, String(stamp));
+      this.setMeta('observations_decl_covered', String(declRev));
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    this.lastObsRebuildAt = Date.now();
+    this.pendingObsWrites = false;
+    return rows.length;
+  }
+
+  /** Rebuild when stale; throttled like the other derived caches — except
+   *  that the in-process dirty flag bypasses the throttle so a read right
+   *  after a write (tests, amend-then-query) sees converged data. */
+  ensureObservationsFresh(maxAgeMs = 2000): void {
+    if (this.readOnly) return;
+    if (!this.observationsDirty()) return;
+    if (!this.pendingObsWrites && Date.now() - this.lastObsRebuildAt < maxAgeMs) return;
+    this.rebuildContextObservations();
+  }
+
+  /** Per-session aggregates for the context overview. */
+  contextOverview(): Array<{
+    sessionId: string; title: string | null; cwd: string | null;
+    origin: string | null; parentSessionId: string | null;
+    model: string | null;
+    lastInput: number | null; lastInputAt: number | null; lastRequestId: string | null;
+    prevInput: number | null; delta: number | null; modelSwitched: boolean;
+    maxInput: number | null; observedRequests: number; totalRequests: number;
+    compactions: number; contextWindow: number | null; lastObsAt: number | null;
+  }> {
+    this.ensureObservationsFresh();
+    interface ObsRow {
+      session_id: string; request_id: string; seq: number; timestamp: number;
+      provider: string | null; model: string | null; kind: string;
+      input_tokens: number | null; context_window: number | null;
+    }
+    const obsRows = this.db
+      .prepare(
+        `SELECT session_id, request_id, seq, timestamp, provider, model, kind,
+                input_tokens, context_window
+           FROM context_observations ORDER BY session_id, seq`,
+      )
+      .all() as unknown as ObsRow[];
+    const metaRows = this.db
+      .prepare('SELECT session_id, title, cwd, origin, parent_session_id FROM sessions')
+      .all() as unknown as Array<{
+        session_id: string; title: string | null; cwd: string | null;
+        origin: string | null; parent_session_id: string | null;
+      }>;
+    const countRows = this.db
+      .prepare(
+        `SELECT session_id, COUNT(*) AS total,
+                SUM(CASE WHEN kind = 'compaction' THEN 1 ELSE 0 END) AS compactions
+           FROM usage_records GROUP BY session_id`,
+      )
+      .all() as unknown as Array<{ session_id: string; total: number; compactions: number }>;
+    const counts = new Map(countRows.map((r) => [r.session_id, r]));
+
+    const sessions = new Map<string, {
+      last: ObsRow | null; prev: ObsRow | null; max: number | null; chatCount: number;
+      window: number | null; lastObsAt: number | null; model: string | null;
+    }>();
+    for (const row of obsRows) {
+      const bucket = sessions.get(row.session_id) ?? {
+        last: null, prev: null, max: null, chatCount: 0, window: null, lastObsAt: null, model: null,
+      };
+      bucket.lastObsAt = row.timestamp;
+      if (row.context_window !== null) bucket.window = row.context_window;
+      if (row.kind === 'chat' && row.input_tokens !== null) {
+        bucket.prev = bucket.last;
+        bucket.last = row;
+        bucket.model = row.model;
+        bucket.chatCount += 1;
+        bucket.max = bucket.max === null ? row.input_tokens : Math.max(bucket.max, row.input_tokens);
+      }
+      sessions.set(row.session_id, bucket);
+    }
+
+    const out: Array<{
+      sessionId: string; title: string | null; cwd: string | null;
+      origin: string | null; parentSessionId: string | null;
+      model: string | null;
+      lastInput: number | null; lastInputAt: number | null; lastRequestId: string | null;
+      prevInput: number | null; delta: number | null; modelSwitched: boolean;
+      maxInput: number | null; observedRequests: number; totalRequests: number;
+      compactions: number; contextWindow: number | null; lastObsAt: number | null;
+    }> = [];
+    for (const meta of metaRows) {
+      const bucket = sessions.get(meta.session_id);
+      const countsRow = counts.get(meta.session_id);
+      const last = bucket?.last ?? null;
+      const prev = bucket?.prev ?? null;
+      out.push({
+        sessionId: meta.session_id,
+        title: typeof meta.title === 'string' && meta.title.length > 0 ? meta.title : null,
+        cwd: meta.cwd ?? null,
+        origin: meta.origin ?? null,
+        parentSessionId: meta.parent_session_id ?? null,
+        model: bucket?.model ?? null,
+        lastInput: last?.input_tokens ?? null,
+        lastInputAt: last?.timestamp ?? null,
+        lastRequestId: last?.request_id ?? null,
+        prevInput: prev?.input_tokens ?? null,
+        delta: last !== null && prev !== null && last.input_tokens !== null && prev.input_tokens !== null
+          ? last.input_tokens - prev.input_tokens
+          : null,
+        modelSwitched: last !== null && prev !== null
+          && last.model !== null && prev.model !== null
+          && last.model !== prev.model,
+        maxInput: bucket?.max ?? null,
+        observedRequests: bucket?.chatCount ?? 0,
+        totalRequests: countsRow ? Number(countsRow.total) : 0,
+        compactions: countsRow ? Number(countsRow.compactions ?? 0) : 0,
+        contextWindow: bucket?.window ?? null,
+        lastObsAt: bucket?.lastObsAt ?? null,
+      });
+    }
+    out.sort((a, b) => (b.lastObsAt ?? 0) - (a.lastObsAt ?? 0));
+    return out;
+  }
+
+  /** Observation series of one session, ascending by seq. */
+  contextObservations(sessionId: string): Array<{
+    requestId: string; seq: number; timestamp: number;
+    provider: string | null; model: string | null; kind: string;
+    inputTokens: number | null; missingMask: number; contextWindow: number | null;
+  }> {
+    this.ensureObservationsFresh();
+    interface ObsRow {
+      request_id: string; seq: number; timestamp: number;
+      provider: string | null; model: string | null; kind: string;
+      input_tokens: number | null; missing_mask: number; context_window: number | null;
+    }
     const rows = this.db
       .prepare(
-        `SELECT seq, timestamp, provider, model, context_tokens, context_window, request_id
-          FROM context_samples
-          WHERE session_id = ? AND context_tokens IS NOT NULL
-          ORDER BY seq ASC`,
+        `SELECT request_id, seq, timestamp, provider, model, kind,
+                input_tokens, missing_mask, context_window
+           FROM context_observations WHERE session_id = ? ORDER BY seq ASC`,
       )
-      .all(sessionId) as Array<Record<string, unknown>>;
+      .all(sessionId) as unknown as ObsRow[];
     return rows.map((row) => ({
+      requestId: row.request_id,
       seq: Number(row.seq),
       timestamp: Number(row.timestamp),
-      provider: typeof row.provider === 'string' ? row.provider : null,
-      model: typeof row.model === 'string' ? row.model : null,
-      contextTokens: Number(row.context_tokens),
-      contextWindow: typeof row.context_window === 'number' ? row.context_window : null,
-      requestId: typeof row.request_id === 'string' ? row.request_id : null,
+      provider: row.provider,
+      model: row.model,
+      kind: row.kind,
+      inputTokens: row.input_tokens,
+      missingMask: Number(row.missing_mask ?? 0),
+      contextWindow: row.context_window,
     }));
   }
 
