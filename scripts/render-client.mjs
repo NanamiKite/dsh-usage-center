@@ -143,14 +143,23 @@ function payloadFor(path) {
   }
   if (path.startsWith('/sessions')) {
     return {
-      items: [{
-        sessionId: 'session-x-1234567890', createdAt: 1794280000000, cwd: 'C:\\ws\\proj',
-        origin: 'subagent', parentSessionId: 'session-parent', requests: 30,
-        inputTokens: 224_258, outputTokens: 19_562, cacheReadTokens: 2_538_176,
-        cacheWriteTokens: 0, totalTokens: 2_781_996, errorCount: 1,
-        firstTimestamp: 1794280000000, lastTimestamp: 1794280100000,
-      }],
-      total: 1,
+      items: [
+        {
+          sessionId: 'session-main', createdAt: 1794270000000, cwd: 'C:\\ws',
+          origin: null, parentSessionId: null, requests: 90,
+          inputTokens: 200_000, outputTokens: 15_000, cacheReadTokens: 2_000_000,
+          cacheWriteTokens: 0, totalTokens: 2_215_000, errorCount: 0,
+          firstTimestamp: 1794270000000, lastTimestamp: 1794280100000,
+        },
+        {
+          sessionId: 'session-x-1234567890', createdAt: 1794280000000, cwd: 'C:\\ws\\proj',
+          origin: 'subagent', parentSessionId: 'session-main', requests: 30,
+          inputTokens: 224_258, outputTokens: 19_562, cacheReadTokens: 2_538_176,
+          cacheWriteTokens: 0, totalTokens: 2_781_996, errorCount: 1,
+          firstTimestamp: 1794280000000, lastTimestamp: 1794280100000,
+        },
+      ],
+      total: 2,
     };
   }
   throw new Error(`unexpected fetch ${path}`);
@@ -485,5 +494,18 @@ if (ledgerRow !== undefined) {
   tree = renderDashboard();
   assert.match(textOf(tree), /上一页/, 'ledger row jumps to requests view');
 }
+
+// Ledger tree: sub-agents are grouped under their parent and expand in place.
+await clickTab('台账');
+let ledgerText = textOf(tree);
+assert.match(ledgerText, /子代理 1/, 'parent row carries a sub-agent count badge');
+assert.ok(!ledgerText.includes('proj'), 'child row hidden until expanded');
+const expander = collectNodes(tree).find((n) => n.tag === 'button' && n.props.className === 'duc-expander');
+assert.ok(expander !== undefined, 'expander button rendered');
+expander.props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /proj/, 'child session expands under its parent');
 
 console.log(`client render drive ok — ${fetchedUrls.length} api calls, tabs exercised`);

@@ -140,6 +140,9 @@ window.__ModuleLoader__.load({
       'context.series': '上下文走势',
       'context.latest': '最新会话',
       'context.selected': '所选会话',
+      'ledger.subagents': '子代理',
+      'ledger.expand': '展开/收起子代理',
+      'ledger.capped': '会话超过 200，仅显示前 {n} 个',
       'table.updated': '更新',
     };
 
@@ -254,6 +257,9 @@ window.__ModuleLoader__.load({
       'context.series': 'Context series',
       'context.latest': 'Latest session',
       'context.selected': 'Selected session',
+      'ledger.subagents': 'sub-agents',
+      'ledger.expand': 'Expand/collapse sub-agents',
+      'ledger.capped': 'More than 200 sessions; showing first {n}',
       'table.updated': 'Updated',
     };
 
@@ -531,6 +537,8 @@ select.duc-input{min-width:100px}
 .duc-cell[data-level="3"]{${ramp(3)}}
 .duc-cell[data-level="4"]{${ramp(4)}}
 .duc-heatlegend{display:flex;align-items:center;gap:4px;font-size:12px;color:${colors.labelSecondary};margin-top:8px}
+.duc-expander{border:none;background:transparent;color:${colors.labelSecondary};cursor:pointer;padding:0 4px;font:inherit;width:14px;line-height:1}
+.duc-expander:hover{color:inherit}
 .duc-glyph{color:${colors.labelSecondary}}
 .duc-glyph[data-active=true]{color:inherit}
 .duc-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:60}
@@ -937,17 +945,82 @@ select.duc-input{min-width:100px}
     }
 
     function LedgerTab({ t, fmt, onOpenSession }) {
-      const limit = 50;
-      const [page, setPage] = useState(0);
+      // Group subagents under their parent conversation and expand in place.
+      // Loads up to 200 sessions (the paged ceiling) so the tree is complete.
       const { loading, data, error, refresh } = useLoad(
-        () => [['res', api('/sessions', { limit, offset: page * limit })]],
-        [page],
+        () => [['res', api('/sessions', { limit: 200, offset: 0 })]],
+        [],
       );
+      const [expanded, setExpanded] = useState({});
       const result = data?.res;
       const items = result?.items ?? [];
       const total = result?.total ?? 0;
+
+      const known = new Set(items.map((s) => s.sessionId));
+      const byParent = new Map();
+      for (const s of items) {
+        if (s.parentSessionId === null || s.parentSessionId === undefined) continue;
+        if (!known.has(s.parentSessionId)) continue; // orphan → root
+        const list = byParent.get(s.parentSessionId) ?? [];
+        list.push(s);
+        byParent.set(s.parentSessionId, list);
+      }
+      for (const list of byParent.values()) {
+        list.sort((a, b) => (a.lastTimestamp ?? 0) - (b.lastTimestamp ?? 0));
+      }
+      const roots = items.filter(
+        (s) => s.parentSessionId === null || s.parentSessionId === undefined || !known.has(s.parentSessionId),
+      );
+
+      const renderRow = (s, depth) => {
+        const kids = byParent.get(s.sessionId) ?? [];
+        const isOpen = expanded[s.sessionId] === true;
+        const row = h('tr', {
+          key: s.sessionId, className: 'clickable',
+          title: `${s.sessionId}${s.parentSessionId ? `\n← ${s.parentSessionId}` : ''}${s.cwd ? `\n${s.cwd}` : ''}`,
+          onClick: () => onOpenSession(s.sessionId),
+        },
+          h('td', null,
+            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, paddingLeft: depth * 18 } },
+              kids.length > 0
+                ? h('button', {
+                  type: 'button', className: 'duc-expander', 'aria-expanded': String(isOpen),
+                  'aria-label': t('ledger.expand'),
+                  onClick: (e) => {
+                    e?.stopPropagation?.();
+                    setExpanded((prev) => ({ ...prev, [s.sessionId]: !(prev[s.sessionId] === true) }));
+                  },
+                }, isOpen ? '▾' : '▸')
+                : h('span', { style: { display: 'inline-block', width: 14 }, 'aria-hidden': 'true' }),
+              h('span', null, sessionName(s)),
+              kids.length > 0
+                ? h('span', { className: 'duc-badge' }, `${t('ledger.subagents')} ${kids.length}`)
+                : null,
+              s.origin === 'subagent' ? h('span', { className: 'duc-badge' }, t('origin.subagent')) : null,
+            )),
+          h('td', null, s.cwd === null ? '' : s.cwd.split(/[\\/]/).pop() || s.cwd),
+          h('td', null, fmt.date(s.createdAt)),
+          h('td', { className: 'num' }, fmt.int(s.requests)),
+          h('td', { className: 'num' }, fmt.compact(s.inputTokens)),
+          h('td', { className: 'num' }, fmt.compact(s.outputTokens)),
+          h('td', { className: 'num' }, fmt.compact(s.totalTokens)),
+          h('td', { className: 'num' }, s.errorCount > 0 ? h('span', { className: 'duc-error' }, fmt.int(s.errorCount)) : h('span', { className: 'duc-muted' }, '–')),
+          h('td', null, fmt.dateTime(s.lastTimestamp)),
+          h('td', { className: 'duc-muted', 'aria-hidden': 'true' }, '›'),
+        );
+        const rows = [row];
+        if (isOpen) {
+          for (const kid of kids) rows.push(...renderRow(kid, depth + 1));
+        }
+        return rows;
+      };
+
       return h('div', null,
         h(StateView, { loading, error, empty: !loading && total === 0, onRetry: refresh, t },
+          total > items.length
+            ? h('div', { className: 'duc-small duc-muted', style: { marginBottom: 8 } },
+                t('ledger.capped', { n: items.length }))
+            : null,
           h('div', { className: 'duc-tablewrap' },
             h('table', { className: 'duc-table' },
               h('thead', null, h('tr', null,
@@ -962,38 +1035,8 @@ select.duc-input{min-width:100px}
                 h('th', null, t('table.lastActivity')),
                 h('th', { 'aria-hidden': 'true' }),
               )),
-              h('tbody', null, items.map((s) =>
-                h('tr', {
-                  key: s.sessionId, className: 'clickable',
-                  title: `${s.sessionId}${s.parentSessionId ? `\n← ${s.parentSessionId}` : ''}${s.cwd ? `\n${s.cwd}` : ''}`,
-                  onClick: () => onOpenSession(s.sessionId),
-                },
-                  h('td', null,
-                    h('span', null, sessionName(s)),
-                    ' ',
-                    h('span', { className: 'duc-badge' },
-                      s.origin === 'subagent' ? t('origin.subagent') : ''),
-                  ),
-                  h('td', null, s.cwd === null ? '' : s.cwd.split(/[\\/]/).pop() || s.cwd),
-                  h('td', null, fmt.date(s.createdAt)),
-                  h('td', { className: 'num' }, fmt.int(s.requests)),
-                  h('td', { className: 'num' }, fmt.compact(s.inputTokens)),
-                  h('td', { className: 'num' }, fmt.compact(s.outputTokens)),
-                  h('td', { className: 'num' }, fmt.compact(s.totalTokens)),
-                  h('td', { className: 'num' }, s.errorCount > 0 ? h('span', { className: 'duc-error' }, fmt.int(s.errorCount)) : h('span', { className: 'duc-muted' }, '–')),
-                  h('td', null, fmt.dateTime(s.lastTimestamp)),
-                  h('td', { className: 'duc-muted', 'aria-hidden': 'true' }, '›'),
-                ))),
+              h('tbody', null, roots.flatMap((s) => renderRow(s, 0))),
             ),
-          ),
-          h('div', { className: 'duc-pager' },
-            h('button', { type: 'button', disabled: page === 0, onClick: () => setPage(page - 1) }, t('page.prev')),
-            h('span', null, t('page.status', {
-              from: total === 0 ? 0 : page * limit + 1,
-              to: Math.min((page + 1) * limit, total),
-              total,
-            })),
-            h('button', { type: 'button', disabled: (page + 1) * limit >= total, onClick: () => setPage(page + 1) }, t('page.next')),
           ),
         ),
       );
