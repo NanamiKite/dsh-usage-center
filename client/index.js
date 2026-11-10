@@ -111,6 +111,13 @@ window.__ModuleLoader__.load({
       'status.error': '失败',
       'costs.basis': '模型用量',
       'costs.pending': '费用估算尚未提供',
+      'costs.suggest': '参考价',
+      'costs.fetch': '获取',
+      'costs.matched': '匹配',
+      'costs.unmatched': '未匹配',
+      'costs.copy': '复制',
+      'costs.copied': '已复制',
+      'costs.paste': 'cordis.patch.yml → config.prices',
       'context.pending': '上下文监控尚未提供',
     };
 
@@ -196,6 +203,13 @@ window.__ModuleLoader__.load({
       'status.error': 'Error',
       'costs.basis': 'Model usage',
       'costs.pending': 'Cost estimates are not available yet',
+      'costs.suggest': 'Reference prices',
+      'costs.fetch': 'Fetch',
+      'costs.matched': 'Match',
+      'costs.unmatched': 'No match',
+      'costs.copy': 'Copy',
+      'costs.copied': 'Copied',
+      'costs.paste': 'cordis.patch.yml → config.prices',
       'context.pending': 'Context monitor is not available yet',
     };
 
@@ -335,6 +349,8 @@ window.__ModuleLoader__.load({
 .duc-section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 0 10px}
 .duc-section-head .duc-section-title{margin:0}
 .duc-small{font-size:12px}
+.duc-pre{margin:10px 0 0;padding:10px 12px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre;overflow:auto;max-height:260px}
+.duc-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .duc-tablewrap{overflow:auto}
 .duc-table{border-collapse:collapse;width:100%;font-size:13px}
 .duc-table th{text-align:left;color:var(--dsw-alias-label-secondary);font-weight:500;padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l2);white-space:nowrap;position:sticky;top:0;background:var(--dsw-alias-bg-layer-1)}
@@ -807,7 +823,7 @@ select.duc-input{min-width:100px}
           ),
         );
       }
-      // No price lists configured: keep the minimal pricing-basis view.
+      // No price lists configured: pricing basis + reference-price suggestions.
       return h(StateView, { loading, error, empty: !loading && basisRows.length === 0, onRetry: refresh, t },
         h('div', { className: 'duc-section' },
           h('div', { className: 'duc-section-head' },
@@ -837,6 +853,85 @@ select.duc-input{min-width:100px}
             ),
           ),
         ),
+        h(PriceSuggest, { t, fmt }),
+      );
+    }
+
+    /** Fetch reference prices from the public listing; suggestions only. */
+    function PriceSuggest({ t, fmt }) {
+      const [state, setState] = useState({ loading: false, data: null, error: null });
+      const [copied, setCopied] = useState(false);
+      const load = () => {
+        setState((prev) => ({ ...prev, loading: true, error: null }));
+        api('/prices/suggest')
+          .then((data) => { setCopied(false); setState({ loading: false, data, error: null }); })
+          .catch((error) => setState({ loading: false, data: null, error: String(error?.message ?? error) }));
+      };
+      const data = state.data;
+      return h('div', { className: 'duc-section' },
+        h('div', { className: 'duc-section-head' },
+          h('h3', { className: 'duc-section-title' }, t('costs.suggest')),
+          h('span', { className: 'duc-small duc-muted' },
+            'OpenRouter · USD',
+            h('button', {
+              type: 'button', className: 'duc-iconbtn', style: { marginLeft: 10 },
+              onClick: load, disabled: state.loading,
+            }, state.loading ? t('state.loading') : t('costs.fetch')),
+          ),
+        ),
+        state.error !== null
+          ? h('div', { className: 'duc-state' },
+              h('div', { className: 'duc-error' }, `${t('state.error')} — ${state.error}`),
+              h('br'),
+              h('button', { type: 'button', className: 'duc-iconbtn', onClick: load }, t('state.retry')),
+            )
+          : null,
+        data !== null
+          ? h('div', { className: 'duc-tablewrap' },
+              h('table', { className: 'duc-table' },
+                h('thead', null, h('tr', null,
+                  h('th', null, t('table.model')),
+                  h('th', null, t('costs.matched')),
+                  h('th', { className: 'num' }, t('table.input')),
+                  h('th', { className: 'num' }, t('table.output')),
+                  h('th', { className: 'num' }, t('table.cacheRead')),
+                )),
+                h('tbody', null, data.matches.map((m) => h('tr', { key: `${m.provider}/${m.model}` },
+                  h('td', null, `${m.provider ?? '?'}/${m.model}`),
+                  h('td', null,
+                    h('span', { className: 'duc-badge' }, m.key),
+                    ' ',
+                    h('span', { className: 'duc-small duc-muted' }, m.confidence),
+                  ),
+                  h('td', { className: 'num' }, m.entry.input === undefined ? '–' : fmt.money(m.entry.input * 1e6, 'USD')),
+                  h('td', { className: 'num' }, m.entry.output === undefined ? '–' : fmt.money(m.entry.output * 1e6, 'USD')),
+                  h('td', { className: 'num' }, m.entry.cacheRead === undefined ? '–' : fmt.money(m.entry.cacheRead * 1e6, 'USD')),
+                ))),
+              ),
+              data.unmatched.length > 0
+                ? h('div', { className: 'duc-chips' },
+                    data.unmatched.map((u) => h('span', {
+                      key: `${u.provider}/${u.model}`,
+                      className: 'duc-badge', title: t('costs.unmatched'),
+                    }, `${u.provider ?? '?'}/${u.model ?? '?'} · ${t('costs.unmatched')}`)),
+                  )
+                : null,
+              h('div', { className: 'duc-section-head', style: { marginTop: 10, marginBottom: 0 } },
+                h('span', { className: 'duc-small duc-muted' }, t('costs.paste')),
+                h('button', {
+                  type: 'button', className: 'duc-iconbtn', onClick: () => {
+                    if (data.yaml !== undefined && navigator.clipboard !== undefined) {
+                      navigator.clipboard.writeText(data.yaml).then(
+                        () => setCopied(true),
+                        () => {},
+                      );
+                    }
+                  },
+                }, copied ? t('costs.copied') : t('costs.copy')),
+              ),
+              h('pre', { className: 'duc-pre' }, data.yaml),
+            )
+          : null,
       );
     }
 

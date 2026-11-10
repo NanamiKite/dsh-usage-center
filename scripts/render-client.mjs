@@ -56,16 +56,19 @@ const record = (n) => ({
   errorMessage: n === 3 ? 'boom' : null, rawUsage: null, sourceEvent: 'assistant/message',
 });
 
+let costsConfigured = false;
+
 function payloadFor(path) {
   if (path.startsWith('/summary')) {
     return {
       totals: { requests: 600, inputTokens: 2_000_000, outputTokens: 900_000, cacheReadTokens: 60_000_000, cacheWriteTokens: 0, reasoningTokens: 0, totalTokens: 63_000_000, cacheHitRate: 0.97, durationMsTotal: 0, durationMsCount: 0, firstTokenMsTotal: 0, firstTokenMsCount: 0 },
       today: { requests: 299, inputTokens: 1_000_000, outputTokens: 300_000, cacheReadTokens: 45_000_000, cacheWriteTokens: 0, reasoningTokens: 0, totalTokens: 47_000_000, cacheHitRate: 0.97, durationMsTotal: 0, durationMsCount: 0, firstTokenMsTotal: 0, firstTokenMsCount: 0 },
       byModel: [], byKind: [], sessions: [], ledger: { records: 600, firstTimestamp: 1, lastTimestamp: 2 },
-      costs: [{ currency: 'USD', requests: 590, totalMicro: 12_345_678, missingCount: 1 }],
+      costs: costsConfigured ? [{ currency: 'USD', requests: 590, totalMicro: 12_345_678, missingCount: 1 }] : null,
     };
   }
   if (path.startsWith('/costs')) {
+    if (!costsConfigured) return { configured: false };
     return {
       configured: true,
       byCurrency: [{ currency: 'USD', requests: 590, totalMicro: 12_345_678, missingCount: 1 }],
@@ -75,6 +78,20 @@ function payloadFor(path) {
       }],
       byDay: [{ day: '2026-11-10', currency: 'USD', totalMicro: 500_000 }],
       coverage: { totalRequests: 600, pricedRequests: 590 },
+    };
+  }
+  if (path.startsWith('/prices/suggest')) {
+    return {
+      source: 'openrouter', sourceUrl: 'https://openrouter.ai/api/v1/models',
+      currency: 'USD', fetchedAt: 1794300000000, entries: 300,
+      matches: [
+        {
+          provider: 'glm', model: 'glm-5.3', requests: 271, key: 'z-ai/glm-5.3', confidence: 'alias',
+          entry: { key: 'z-ai/glm-5.3', provider: 'z-ai', model: 'glm-5.3', input: 1.1, output: 4.4, cacheRead: 0.11 },
+        },
+      ],
+      unmatched: [{ provider: null, model: null, requests: 1 }],
+      yaml: "- name: openrouter-test\n  currency: USD\n  effectiveFrom: '2026-11-10'\n  models:\n    - { model: glm-5.3, provider: glm, input: 1.1, output: 4.4, cacheRead: 0.11 }",
     };
   }
   if (path.startsWith('/trend')) return { points: trendPoints };
@@ -293,6 +310,23 @@ for (const label of ['请求', '台账', '费用', '上下文', '总览', '请�
 }
 
 assert.match(textOf(tree), /上一页/, 'requests pager rendered');
+
+// Costs (unconfigured): fetch reference prices, table + yaml render.
+await clickTab('费用');
+const fetchButton = findButtonWithText(tree, '获取');
+assert.ok(fetchButton !== undefined, 'suggest fetch button found');
+fetchButton.props.onClick();
+await settle();
+tree = renderDashboard();
+const costsText = textOf(tree);
+assert.match(costsText, /z-ai\/glm-5\.3/, 'suggestion match table rendered');
+assert.match(costsText, /effectiveFrom/, 'suggestion yaml rendered');
+
+// Costs (configured): estimate cards view.
+costsConfigured = true;
+await clickTab('总览');
+await clickTab('费用');
+assert.match(textOf(tree), /USD/, 'configured cost view rendered');
 
 // Ledger row click jumps to requests with a session filter.
 await clickTab('台账');

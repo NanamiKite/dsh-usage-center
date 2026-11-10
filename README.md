@@ -39,6 +39,8 @@ pnpm build        # 生成 lib/
 | `historyImport` | `true` | 启动时导入历史会话 |
 | `apiPath` | `/dsh-usage-center/v1` | HTTP 查询前缀（客户端面板按默认前缀取数） |
 | `prices` | — | 价格表数组，见下 |
+| `priceAliases` | 内置 `glm→z-ai` 等 | 账本 provider → 价格源 provider，覆盖内置别名 |
+| `priceSourceUrl` | OpenRouter 模型 API | 参考价数据源 URL |
 
 价格表格式（在 cordis.patch.yml 的 config 段，追加即生效、按内容去重）：
 
@@ -54,6 +56,8 @@ prices:
 
 单价均为**每 1M token**。同一时刻生效日期最新的一张表生效；表内按 精确 provider+model > 通配 provider > 通配 model 取最具体的条目。某类 token 没配价就按未计价处理并计数（覆盖率可见），绝不猜价。
 
+不想手抄价格的话，费用页（未配置价格时）有“参考价”：从 [OpenRouter](https://openrouter.ai/api/v1/models) 公开列表拉取市场参考价，把账本里的模型按别名表（`glm→z-ai`、`deepseek-account→deepseek`、`gpt→openai`，可用 `priceAliases` 覆盖）匹配出单价，生成可直接粘贴的 `prices` 配置。建议永不自动生效——源里找不到的模型会如实标为未匹配。同名字段 `priceSourceUrl` 可换数据源。参考价是聚合商市场价，不是你账户的账单价格。
+
 ## HTTP API
 
 前缀默认 `/dsh-usage-center/v1`，全部为 GET，返回 JSON：
@@ -67,6 +71,7 @@ prices:
 | `/breakdown` | `by=model\|provider\|kind` | 分组统计 |
 | `/sessions` | `limit` `offset` | 逐会话台账汇总 |
 | `/prices` | — | 已同步的价格表 |
+| `/prices/suggest` | — | 拉取公开列表，生成参考价建议与可粘贴 YAML（不落库） |
 | `/costs` | `from` `to` | 估算费用（按币种/模型/天 + 覆盖率） |
 | `/export` | `what=records\|costs\|sessions` `format=csv\|json` 及明细筛选 | 文件下载 |
 | `/report/reconcile` | — | 账本 vs 会话日志对账报告（全量重读，秒级） |

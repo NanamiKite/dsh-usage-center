@@ -16,6 +16,10 @@ import { importHistory, type RecordSink } from './collector/history-importer.js'
 import { reconcileAgainstLogs, type ReconcileSessionQuery } from './collector/reconciler.js';
 import { UsageDatabase } from './storage/database.js';
 import { QueryService } from './query/query-service.js';
+import {
+  matchPrices, normalizeOpenRouter, suggestionYaml, localToday,
+  type SourcePriceEntry,
+} from './domain/price-sources.js';
 
 export interface UsageCenterConfig {
   /** Absolute SQLite path. Default: $DSH_HOME/dsh-usage-center/usage-center.db */
@@ -32,6 +36,10 @@ export interface UsageCenterConfig {
    * with per-1M-token prices. Append-only and deduplicated by content hash.
    */
   prices?: unknown[];
+  /** Ledger provider id → price-source provider (overrides built-in aliases). */
+  priceAliases?: Record<string, string>;
+  /** Price source listing URL. Default: the OpenRouter model API. */
+  priceSourceUrl?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +313,51 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
                   return;
                 }
                 case 'prices': {
+                  if (url.pathname.split('/').pop() === 'suggest') {
+                    // Reference prices from a public listing: suggestions
+                    // only — applying them stays a config edit by the user.
+                    const sourceUrl = config.priceSourceUrl
+                      ?? 'https://openrouter.ai/api/v1/models';
+                    void (async () => {
+                      try {
+                        const response = await fetch(sourceUrl, {
+                          signal: AbortSignal.timeout(30_000),
+                          headers: { accept: 'application/json' },
+                        });
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                        const entries: SourcePriceEntry[] = normalizeOpenRouter(
+                          await response.json(),
+                        );
+                        if (entries.length === 0) throw new Error('empty listing');
+                        const ledger = query.breakdown('model')
+                          .map((row) => ({ provider: row.provider, model: row.model, requests: row.requests }));
+                        const { matches, unmatched } = matchPrices(entries, ledger, config.priceAliases ?? {});
+                        const day = localToday();
+                        send(res, 200, {
+                          source: 'openrouter',
+                          sourceUrl,
+                          currency: 'USD',
+                          fetchedAt: Date.now(),
+                          entries: entries.length,
+                          matches,
+                          unmatched,
+                          yaml: suggestionYaml(matches, {
+                            name: `openrouter-${day}`, currency: 'USD', effectiveFrom: day,
+                          }),
+                        });
+                      } catch (error) {
+                        ctx.logger.warn('dsh-usage-center: price suggest failed', error);
+                        try {
+                          send(res, 502, {
+                            error: `price source unreachable: ${String((error as Error)?.message ?? error)}`,
+                          });
+                        } catch {
+                          // response already started
+                        }
+                      }
+                    })();
+                    return;
+                  }
                   send(res, 200, query.prices());
                   return;
                 }
