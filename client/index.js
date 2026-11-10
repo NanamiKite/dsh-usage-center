@@ -138,6 +138,8 @@ window.__ModuleLoader__.load({
       'context.compactions': '压缩',
       'context.back': '返回',
       'context.series': '上下文走势',
+      'context.latest': '最新会话',
+      'context.selected': '所选会话',
       'table.updated': '更新',
     };
 
@@ -250,6 +252,8 @@ window.__ModuleLoader__.load({
       'context.compactions': 'Compactions',
       'context.back': 'Back',
       'context.series': 'Context series',
+      'context.latest': 'Latest session',
+      'context.selected': 'Selected session',
       'table.updated': 'Updated',
     };
 
@@ -831,20 +835,41 @@ select.duc-input{min-width:100px}
         () => [['res', api('/records', query)]],
         [filters.provider, filters.model, filters.kind, filters.sessionId, page],
       );
+      // Dropdown facets: the distinct providers/models that actually exist in
+      // the ledger (reuses the breakdown endpoints, busiest first).
+      const facets = useLoad(
+        () => [
+          ['providers', api('/breakdown', { by: 'provider' })],
+          ['models', api('/breakdown', { by: 'model' })],
+        ],
+        [],
+      );
       const setInput = (field, value) => setFilters((prev) => ({ ...prev, [field]: value, page: 0 }));
+      const providerOptions = (facets.data?.providers?.rows ?? [])
+        .map((r) => r.key)
+        .filter((key) => typeof key === 'string' && key.length > 0);
+      const modelOptions = [...new Set((facets.data?.models?.rows ?? [])
+        .map((r) => r.model)
+        .filter((model) => typeof model === 'string' && model.length > 0))];
       const result = data?.res;
       const items = result?.items ?? [];
       const total = result?.total ?? 0;
       return h('div', null,
         h('div', { className: 'duc-filters' },
-          h('input', {
-            className: 'duc-input', placeholder: t('filter.provider'), value: filters.provider ?? '',
+          h('select', {
+            className: 'duc-input', value: filters.provider ?? '',
             onChange: (e) => setInput('provider', e.target.value),
-          }),
-          h('input', {
-            className: 'duc-input', placeholder: t('filter.model'), value: filters.model ?? '',
+          },
+            h('option', { value: '' }, t('filter.provider')),
+            providerOptions.map((p) => h('option', { key: p, value: p }, p)),
+          ),
+          h('select', {
+            className: 'duc-input', value: filters.model ?? '',
             onChange: (e) => setInput('model', e.target.value),
-          }),
+          },
+            h('option', { value: '' }, t('filter.model')),
+            modelOptions.map((m) => h('option', { key: m, value: m }, m)),
+          ),
           h('select', {
             className: 'duc-input', value: filters.kind ?? '',
             onChange: (e) => setInput('kind', e.target.value),
@@ -1007,10 +1032,17 @@ select.duc-input{min-width:100px}
           && (s.input !== null || s.output !== null || s.cacheRead !== null || s.cacheWrite !== null),
       );
       const priceCell = (s) => {
-        const perM = (value) => (value === null || value === undefined ? null : `$${value}`);
-        const parts = [perM(s.input), perM(s.output), perM(s.cacheRead), perM(s.cacheWrite)]
-          .filter((part) => part !== null);
-        return parts.length > 0 ? parts.join(' · ') : '–';
+        const line = (label, value) => (value === null || value === undefined ? null : `${label} $${value}`);
+        const lines = [
+          line(t('table.input'), s.input),
+          line(t('table.output'), s.output),
+          line(t('table.cacheRead'), s.cacheRead),
+          line(t('chart.cacheWrite'), s.cacheWrite),
+        ].filter((part) => part !== null);
+        return lines.length > 0
+          ? h('span', { style: { display: 'inline-block', lineHeight: 1.5, textAlign: 'left' } },
+              lines.map((l, i) => h('div', { key: i }, l)))
+          : '–';
       };
       const matchTag = (s) => s.matchQuality === null
         ? t('suggest.match.none')
@@ -1108,15 +1140,12 @@ select.duc-input{min-width:100px}
       const rows = configured
         ? costs.byModel
         : basisRows.map((row) => ({ ...row, currency: null, totalMicro: null, price: null }));
-      const priceCell = (price) => {
+      // Each price category gets its own column — a joined "a · b · c" string
+      // left the mapping between number and category unreadable.
+      const priceCol = (price, field) => {
         if (price === null || price === undefined) return '–';
-        const perM = (value) => (value === undefined ? null : fmt.money(value * 1e6, 'USD'));
-        const parts = [
-          perM(price.input),
-          perM(price.output),
-          perM(price.cacheRead),
-        ].filter((part) => part !== null);
-        return parts.length > 0 ? parts.join(' · ') : '–';
+        const value = price[field];
+        return value === undefined || value === null ? '–' : fmt.money(value * 1e6, 'USD');
       };
       return h(StateView, { loading, error, empty: !loading && rows.length === 0, onRetry: refresh, t },
         configured
@@ -1156,18 +1185,21 @@ select.duc-input{min-width:100px}
                 h('th', null, t('table.model')),
                 h('th', { className: 'num' }, t('table.requests')),
                 h('th', { className: 'num' }, t('table.total')),
-                h('th', { className: 'num' }, `${t('costs.price')}`),
+                h('th', { className: 'num', title: t('table.input') }, `${t('table.input')} /1M`),
+                h('th', { className: 'num', title: t('table.output') }, `${t('table.output')} /1M`),
+                h('th', { className: 'num', title: t('table.cacheRead') }, `${t('table.cacheRead')} /1M`),
                 h('th', { className: 'num' }, `≈ ${t('table.cost')}`),
               )),
               h('tbody', null, rows.map((row) => h('tr', {
                 key: `${row.key}|${row.currency ?? ''}`,
-                title: `${t('costs.price')}: ${t('table.input')}·${t('table.output')}·${t('table.cacheRead')}${row.missingCount > 0 ? `\n⚠ ${row.missingCount}` : ''}`,
+                title: `${t('costs.price')} /1M${row.missingCount > 0 ? `\n⚠ ${row.missingCount}` : ''}`,
               },
                 h('td', null, row.key),
                 h('td', { className: 'num' }, fmt.int(row.requests)),
                 h('td', { className: 'num' }, fmt.compact(row.totalTokens)),
-                h('td', { className: 'num', title: `${t('table.input')}·${t('table.output')}·${t('table.cacheRead')}` },
-                  priceCell(row.price)),
+                h('td', { className: 'num' }, priceCol(row.price, 'input')),
+                h('td', { className: 'num' }, priceCol(row.price, 'output')),
+                h('td', { className: 'num' }, priceCol(row.price, 'cacheRead')),
                 h('td', { className: 'num' },
                   row.totalMicro === null || row.totalMicro === undefined
                     ? '–'
@@ -1250,15 +1282,52 @@ select.duc-input{min-width:100px}
     }
 
     function ContextTab({ t, fmt }) {
+      // `selected` carries the clicked session row so the detail view can show
+      // its stat cards without a second round-trip ("click a row, see that
+      // row" — the overview cards stay bound to the latest session).
       const [selected, setSelected] = useState(null);
       const overview = useLoad(
         () => [['ctx', selected === null ? api('/context') : Promise.resolve({})]],
         [selected === null],
       );
       const detail = useLoad(
-        () => [['d', selected !== null ? api('/context', { sessionId: selected }) : Promise.resolve({ samples: [] })]],
+        () => [['d', selected !== null ? api('/context', { sessionId: selected.sessionId }) : Promise.resolve({ samples: [] })]],
         [selected],
       );
+      const waterCards = (row) => {
+        const pct = row.contextTokens !== null && row.contextWindow
+          ? row.contextTokens / row.contextWindow
+          : null;
+        return [
+          h(StatCard, {
+            key: 'usage',
+            title: t('context.usage'),
+            value: pct === null ? '–' : `${(pct * 100).toFixed(0)}%`,
+            sub: row.contextTokens === null || row.contextWindow === null
+              ? undefined
+              : `${fmt.compact(row.contextTokens)} / ${fmt.compact(row.contextWindow)}`,
+          }),
+          h(StatCard, {
+            key: 'remaining',
+            title: t('context.remaining'),
+            value: pct === null
+              ? '–'
+              : fmt.compact(Math.max(row.contextWindow - (row.contextTokens ?? 0), 0)),
+            sub: `${t('context.window')} ${row.contextWindow === null ? '–' : fmt.compact(row.contextWindow)}`,
+          }),
+          h(StatCard, {
+            key: 'peak',
+            title: t('context.peak'),
+            value: row.peakTokens === null ? '–' : fmt.compact(row.peakTokens),
+            sub: `${fmt.int(row.requests)} ${t('chart.requestsUnit')}`,
+          }),
+          h(StatCard, {
+            key: 'compactions',
+            title: t('context.compactions'),
+            value: fmt.int(row.compactions),
+          }),
+        ];
+      };
       if (selected !== null) {
         const samples = detail.data?.d?.samples ?? [];
         const windowTokens = samples.length > 0
@@ -1268,6 +1337,9 @@ select.duc-input{min-width:100px}
           loading: detail.loading, error: detail.error,
           empty: !detail.loading && samples.length === 0, onRetry: detail.refresh, t,
         },
+          h('div', { className: 'duc-small duc-muted', style: { marginBottom: 8 } },
+            `${t('context.selected')} · ${sessionName(selected.row)}`),
+          h('div', { className: 'duc-grid' }, waterCards(selected.row)),
           h('div', { className: 'duc-section' },
             h('div', { className: 'duc-section-head' },
               h('h3', { className: 'duc-section-title' }, t('context.series')),
@@ -1282,36 +1354,15 @@ select.duc-input{min-width:100px}
       }
       const sessions = overview.data?.ctx?.sessions ?? [];
       const latest = sessions[0];
-      const latestPct = latest !== undefined && latest.contextTokens !== null && latest.contextWindow
-        ? latest.contextTokens / latest.contextWindow
-        : null;
       return h(StateView, {
         loading: overview.loading, error: overview.error,
         empty: !overview.loading && sessions.length === 0, onRetry: overview.refresh, t,
       },
         latest !== undefined
-          ? h('div', { className: 'duc-grid' },
-              h(StatCard, {
-                title: t('context.usage'),
-                value: latestPct === null ? '–' : `${(latestPct * 100).toFixed(0)}%`,
-                sub: sessionName(latest),
-              }),
-              h(StatCard, {
-                title: t('context.remaining'),
-                value: latestPct === null || latest.contextWindow === null
-                  ? '–'
-                  : fmt.compact(Math.max(latest.contextWindow - (latest.contextTokens ?? 0), 0)),
-                sub: `${t('context.window')} ${latest.contextWindow === null ? '–' : fmt.compact(latest.contextWindow)}`,
-              }),
-              h(StatCard, {
-                title: t('context.peak'),
-                value: latest.peakTokens === null ? '–' : fmt.compact(latest.peakTokens),
-                sub: `${fmt.int(latest.requests)} ${t('chart.requestsUnit')}`,
-              }),
-              h(StatCard, {
-                title: t('context.compactions'),
-                value: fmt.int(latest.compactions),
-              }),
+          ? h('div', null,
+              h('div', { className: 'duc-small duc-muted', style: { marginBottom: 8 } },
+                `${t('context.latest')} · ${sessionName(latest)}`),
+              h('div', { className: 'duc-grid' }, waterCards(latest)),
             )
           : null,
         h('div', { className: 'duc-section' },
@@ -1334,7 +1385,7 @@ select.duc-input{min-width:100px}
                 return h('tr', {
                   key: s.sessionId, className: 'clickable',
                   title: s.sessionId,
-                  onClick: () => setSelected(s.sessionId),
+                  onClick: () => setSelected({ sessionId: s.sessionId, row: s }),
                 },
                   h('td', null,
                     h('span', null, sessionName(s)),

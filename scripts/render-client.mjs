@@ -119,6 +119,15 @@ function payloadFor(path) {
     return { by: 'all', points: trendPoints };
   }
   if (path.startsWith('/breakdown')) {
+    if (path.includes('by=provider')) {
+      return {
+        dim: 'provider',
+        rows: [
+          { key: 'glm', provider: 'glm', model: null, requests: 500, totalTokens: 61_000_000 },
+          { key: 'deepseek-account', provider: 'deepseek-account', model: null, requests: 90, totalTokens: 11_000_000 },
+        ],
+      };
+    }
     return {
       dim: 'model',
       rows: [{
@@ -355,12 +364,21 @@ for (const label of ['请求', '台账', '费用', '上下文', '总览', '请�
 
 assert.match(textOf(tree), /上一页/, 'requests pager rendered');
 
-// Costs (unconfigured): unified table with "–" price/cost cells.
+// Requests filters: provider/model dropdowns populated from ledger facets.
+const filterSelects = collectNodes(tree).filter((n) => n.tag === 'select');
+assert.ok(filterSelects.length >= 3, 'provider/model/kind dropdowns rendered');
+const filterSelectText = filterSelects.map((s) => textOf(s)).join('|');
+assert.match(filterSelectText, /glm-5\.3/, 'model options populated');
+assert.match(filterSelectText, /deepseek-account/, 'provider options populated');
+
+// Costs (unconfigured): unified table with per-category price columns ("–").
 await clickTab('费用');
 assert.match(textOf(tree), /模型用量/, 'unconfigured costs table rendered');
-assert.match(textOf(tree), /单价/, 'price column present');
+assert.match(textOf(tree), /输入 \/1M/, 'input price column present');
+assert.match(textOf(tree), /输出 \/1M/, 'output price column present');
+assert.match(textOf(tree), /缓存读 \/1M/, 'cache-read price column present');
 
-// Costs (configured): estimate cards + price + cost cells.
+// Costs (configured): estimate cards + labeled price cells.
 costsConfigured = true;
 await clickTab('总览');
 await clickTab('费用');
@@ -414,6 +432,8 @@ dirty = true;
 await settle();
 tree = renderDashboard();
 assert.match(textOf(tree), /seq 10/, 'context series chart rendered');
+assert.match(textOf(tree), /所选会话/, 'detail water cards bound to the clicked session');
+assert.match(textOf(tree), /峰值/, 'detail cards show peak watermark');
 await clickTab('总览');
 
 // Trend dimension switch: provider view renders per-key legend.
