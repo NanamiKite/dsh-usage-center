@@ -157,3 +157,137 @@ test('live and replay paths produce identical observations (both are just record
   assert.deepEqual(first, second);
   db.close();
 });
+
+test('observation rows carry per-request detail and cost estimate via 1:1 joins', () => {
+  const db = new UsageDatabase(':memory:');
+  db.upsertContextSample(decl(1, 100_000));
+  db.upsertRecord(record({
+    requestId: 's1:2', seq: 2, inputTokens: 1000, cacheReadTokens: 9000, cacheWriteTokens: 0,
+    outputTokens: 500, durationMs: 4200, firstTokenLatencyMs: 900,
+  }));
+  db.upsertRecord(record({
+    requestId: 's1:3', seq: 3, kind: 'attempt', sourceEvent: 'assistant/attempt',
+    finishReason: 'error', errorCode: 'SERVER',
+    inputTokens: 300, cacheReadTokens: null, cacheWriteTokens: null, outputTokens: null,
+  }));
+  let rows = db.contextObservations('s1');
+  assert.equal(rows.length, 2);
+  const [chat, attempt] = rows;
+  assert.equal(chat.inputRaw, 1000, 'raw input category joined from the ledger');
+  assert.equal(chat.cacheRead, 9000);
+  assert.equal(chat.outputTokens, 500);
+  assert.equal(chat.durationMs, 4200);
+  assert.equal(chat.firstTokenLatencyMs, 900);
+  assert.equal(chat.errorCode, null);
+  assert.equal(chat.costMicro, null, 'no price list → no estimate, never 0');
+  assert.equal(chat.costCurrency, null);
+  assert.equal(attempt.errorCode, 'SERVER', 'failed attempt keeps its error code');
+  // Syncing a price list surfaces the per-request estimate on the same row.
+  db.syncPriceLists([{
+    name: 'test', currency: 'USD', effectiveFrom: 0,
+    models: [{ provider: 'glm', model: 'glm-5.3', input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 }],
+  }]);
+  db.rebuildCosts();
+  rows = db.contextObservations('s1');
+  assert.ok(rows[0].costMicro !== null && rows[0].costMicro > 0, 'priced request carries its estimate');
+  assert.equal(rows[0].costCurrency, 'USD');
+  db.close();
+});
+
+test('consecutive compactions and a trailing compaction all stay as markers', () => {
+  const db = new UsageDatabase(':memory:');
+  db.upsertSession({ sessionId: 's1', createdAt: 1, cwd: null, parentSessionId: null, origin: null, seedLength: null, lastSeq: null, title: null, updatedAt: 1 });
+  db.upsertContextSample(decl(1, 100_000));
+  db.upsertRecord(record({ requestId: 's1:2', seq: 2, inputTokens: 500, cacheReadTokens: 0, timestamp: 1000 }));
+  db.upsertRecord(record({ requestId: 's1:3', seq: 3, kind: 'compaction', sourceEvent: 'compaction/summary', inputTokens: null, cacheReadTokens: null, cacheWriteTokens: null, outputTokens: 100, durationMs: 8000, timestamp: 2000 }));
+  db.upsertRecord(record({ requestId: 's1:4', seq: 4, kind: 'compaction', sourceEvent: 'compaction/summary', inputTokens: null, cacheReadTokens: null, cacheWriteTokens: null, outputTokens: 50, durationMs: 6000, timestamp: 3000 }));
+  db.upsertRecord(record({ requestId: 's1:5', seq: 5, inputTokens: 60, cacheReadTokens: 0, timestamp: 4000 }));
+  db.upsertRecord(record({ requestId: 's1:6', seq: 6, kind: 'compaction', sourceEvent: 'compaction/summary', inputTokens: null, cacheReadTokens: null, cacheWriteTokens: null, outputTokens: 30, timestamp: 5000 }));
+  const rows = db.contextObservations('s1');
+  assert.deepEqual(rows.map((r) => r.kind), ['chat', 'compaction', 'compaction', 'chat', 'compaction']);
+  assert.deepEqual(rows.map((r) => r.seq), [2, 3, 4, 5, 6], 'order preserved');
+  assert.equal(rows[1].durationMs, 8000);
+  assert.equal(rows[4].inputTokens, null, 'trailing compaction keeps null input');
+  const [s] = db.contextOverview();
+  assert.equal(s.compactions, 3);
+  assert.equal(s.totalRequests, 5);
+  db.close();
+});
+
+test('mid-session model switch is visible in the observation series itself', () => {
+  const db = new UsageDatabase(':memory:');
+  db.upsertContextSample(decl(1, 100_000));
+  db.upsertRecord(record({ requestId: 's1:2', seq: 2, inputTokens: 100, cacheReadTokens: 0, model: 'glm-5.3' }));
+  db.upsertRecord(record({ requestId: 's1:3', seq: 3, inputTokens: 200, cacheReadTokens: 0, model: 'glm-5.3-flash' }));
+  const rows = db.contextObservations('s1');
+  assert.equal(rows[0].model, 'glm-5.3');
+  assert.equal(rows[1].model, 'glm-5.3-flash', 'series carries the switch point');
+  db.close();
+});
+
+test('context detail joins fresh costs without a manual rebuild (read-after-write)', () => {
+  const db = new UsageDatabase(':memory:');
+  db.syncPriceLists([{
+    name: 't', currency: 'USD', effectiveFrom: 0,
+    models: [{ provider: 'glm', model: 'glm-5.3', input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }],
+  }]);
+  db.upsertContextSample(decl(1, 100_000));
+  db.upsertRecord(record({ requestId: 's1:2', seq: 2, inputTokens: 1_000_000, cacheReadTokens: 0, outputTokens: 0 }));
+  const [row] = db.contextObservations('s1');
+  assert.ok(row.costMicro !== null && row.costMicro > 0, 'estimate present on the first read after the write');
+  assert.equal(row.costMicro, 1_000_000);
+  db.upsertRecord(record({ requestId: 's1:2', seq: 2, inputTokens: 2_000_000, cacheReadTokens: 0, outputTokens: 0 }));
+  const [amended] = db.contextObservations('s1');
+  assert.equal(amended.inputTokens, 2_000_000);
+  assert.equal(amended.costMicro, 2_000_000, 'amended usage updates the estimate on the same read path');
+  db.close();
+});
+
+test('a later declaration without a window ends the carry-over', () => {
+  const db = new UsageDatabase(':memory:');
+  db.upsertSession({ sessionId: 's1', createdAt: 1, cwd: null, parentSessionId: null, origin: null, seedLength: null, lastSeq: null, title: null, updatedAt: 1 });
+  db.upsertContextSample(decl(1, 100_000));
+  db.upsertRecord(record({ requestId: 's1:2', seq: 2, inputTokens: 100, cacheReadTokens: 0, timestamp: 1000 }));
+  // Model switch: the new declaration carries provider/model but no window.
+  db.upsertContextSample(decl(5, null));
+  db.upsertRecord(record({ requestId: 's1:6', seq: 6, inputTokens: 200, cacheReadTokens: 0, model: 'glm-5.3-flash', timestamp: 2000 }));
+  const rows = db.contextObservations('s1');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].contextWindow, 100_000);
+  assert.equal(rows[1].contextWindow, null, 'latest declaration has no window → unknown, not the old model\'s value');
+  const [s] = db.contextOverview();
+  assert.equal(s.contextWindow, null, 'overview follows the latest observation, including null');
+  db.close();
+});
+
+test('long session: 5k requests derive and query without pathological cost', () => {
+  const db = new UsageDatabase(':memory:');
+  db.upsertContextSample({ sessionId: 'big', seq: 1, timestamp: 1, provider: 'glm', model: 'glm-5.3', contextWindow: 200_000 });
+  db.upsertSession({ sessionId: 'big', createdAt: 1, cwd: null, parentSessionId: null, origin: null, seedLength: null, lastSeq: null, title: null, updatedAt: 1 });
+  const t0 = Date.now();
+  for (let i = 0; i < 5000; i += 1) {
+    db.upsertRecord(record({
+      requestId: `big:${i}`, sessionId: 'big', seq: i + 1,
+      inputTokens: 10_000 + i, cacheReadTokens: 0, timestamp: 1794000000000 + i * 1000,
+    }));
+  }
+  const tInsert = Date.now() - t0;
+  const t1 = Date.now();
+  const count = db.rebuildContextObservations();
+  const tRebuild = Date.now() - t1;
+  assert.equal(count, 5000, 'every request observed');
+  const t2 = Date.now();
+  const rows = db.contextObservations('big');
+  const tQuery = Date.now() - t2;
+  assert.equal(rows.length, 5000);
+  assert.equal(rows[4999].inputTokens, 10_000 + 4999);
+  assert.equal(rows[4999].outputTokens, 50, 'enrichment join covers the whole series');
+  const t3 = Date.now();
+  db.contextOverview();
+  const tOverview = Date.now() - t3;
+  assert.ok(tRebuild < 10_000, `rebuild took ${tRebuild}ms`);
+  assert.ok(tQuery < 5_000, `query took ${tQuery}ms`);
+  assert.ok(tOverview < 5_000, `overview took ${tOverview}ms`);
+  console.log(`context perf (5k requests): insert ${tInsert}ms · rebuild ${tRebuild}ms · query ${tQuery}ms · overview ${tOverview}ms`);
+  db.close();
+});

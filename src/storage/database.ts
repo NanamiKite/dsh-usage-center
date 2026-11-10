@@ -1330,7 +1330,10 @@ export class UsageDatabase {
   ensureCostsFresh(maxAgeMs = 2000): void {
     if (this.readOnly) return;
     if (!this.costsDirty()) return;
-    if (Date.now() - this.lastCostRebuildAt < maxAgeMs) return;
+    // Same read-after-write bypass as the observations cache: an in-process
+    // write flag must beat the throttle, or a read right after a write (new
+    // request, usage amendment) joins stale cost rows.
+    if (!this.pendingCostWrites && Date.now() - this.lastCostRebuildAt < maxAgeMs) return;
     this.rebuildCosts();
   }
 
@@ -1619,8 +1622,11 @@ export class UsageDatabase {
       .all() as unknown as RecordRow[];
     const decls = this.db
       .prepare(
+        // ALL declarations, including ones without a window value: a later
+        // null-window declaration must END the carry-over from an earlier
+        // one (model switched, window unknown), not be invisible to it.
         `SELECT session_id, seq, context_window FROM context_samples
-          WHERE context_window IS NOT NULL ORDER BY session_id, seq`,
+          ORDER BY session_id, seq`,
       )
       .all() as unknown as DeclRow[];
     const declsBySession = new Map<string, DeclRow[]>();
@@ -1771,7 +1777,9 @@ export class UsageDatabase {
         last: null, prev: null, max: null, chatCount: 0, window: null, lastObsAt: null, model: null,
       };
       bucket.lastObsAt = row.timestamp;
-      if (row.context_window !== null) bucket.window = row.context_window;
+      // Latest observation wins, including null: if the most recent
+      // declaration has no window, the session's window is unknown.
+      bucket.window = row.context_window;
       if (row.kind === 'chat' && row.input_tokens !== null) {
         bucket.prev = bucket.last;
         bucket.last = row;
@@ -1825,23 +1833,48 @@ export class UsageDatabase {
     return out;
   }
 
-  /** Observation series of one session, ascending by seq. */
+  /**
+   * Observation series of one session, ascending by seq. Beyond the stored
+   * observation columns the rows are enriched at read time with the ledger's
+   * per-request detail (raw token categories, duration, latency, error) and
+   * the per-request cost estimate when one exists — both joined 1:1 on the
+   * `usage_records` primary key, so the detail drill-down needs no second
+   * fetch. Cost fields stay null when no price list covers the request.
+   */
   contextObservations(sessionId: string): Array<{
     requestId: string; seq: number; timestamp: number;
     provider: string | null; model: string | null; kind: string;
     inputTokens: number | null; missingMask: number; contextWindow: number | null;
+    inputRaw: number | null; cacheRead: number | null; cacheWrite: number | null;
+    outputTokens: number | null; durationMs: number | null; firstTokenLatencyMs: number | null;
+    errorCode: string | null;
+    costMicro: number | null; costCurrency: string | null;
   }> {
     this.ensureObservationsFresh();
+    // The cost join must see estimates for writes that just landed — without
+    // this, a fresh request shows null cost and an amended one keeps its old
+    // estimate until some other view happens to rebuild the cache.
+    this.ensureCostsFresh();
     interface ObsRow {
       request_id: string; seq: number; timestamp: number;
       provider: string | null; model: string | null; kind: string;
       input_tokens: number | null; missing_mask: number; context_window: number | null;
+      raw_input: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null;
+      output_tokens: number | null; duration_ms: number | null; first_token_latency_ms: number | null;
+      error_code: string | null; total_micro: number | null; currency: string | null;
     }
     const rows = this.db
       .prepare(
-        `SELECT request_id, seq, timestamp, provider, model, kind,
-                input_tokens, missing_mask, context_window
-           FROM context_observations WHERE session_id = ? ORDER BY seq ASC`,
+        `SELECT o.request_id, o.seq, o.timestamp, o.provider, o.model, o.kind,
+                o.input_tokens, o.missing_mask, o.context_window,
+                r.input_tokens AS raw_input, r.cache_read_tokens, r.cache_write_tokens,
+                r.output_tokens, r.duration_ms, r.first_token_latency_ms, r.error_code,
+                c.total_micro, c.currency
+           FROM context_observations o
+           LEFT JOIN usage_records r ON r.request_id = o.request_id
+           LEFT JOIN cost_entries c ON c.request_id = o.request_id
+          WHERE o.session_id = ?
+          ORDER BY o.seq ASC`,
       )
       .all(sessionId) as unknown as ObsRow[];
     return rows.map((row) => ({
@@ -1854,6 +1887,15 @@ export class UsageDatabase {
       inputTokens: row.input_tokens,
       missingMask: Number(row.missing_mask ?? 0),
       contextWindow: row.context_window,
+      inputRaw: row.raw_input,
+      cacheRead: row.cache_read_tokens,
+      cacheWrite: row.cache_write_tokens,
+      outputTokens: row.output_tokens,
+      durationMs: row.duration_ms,
+      firstTokenLatencyMs: row.first_token_latency_ms,
+      errorCode: row.error_code,
+      costMicro: row.total_micro,
+      costCurrency: row.currency,
     }));
   }
 

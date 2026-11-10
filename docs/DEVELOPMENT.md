@@ -13,6 +13,8 @@ node scripts/render-client.mjs      # 客户端组件树渲染驱动（改 clien
 
 门禁约定：`client/` 的任何改动都要过 smoke + render drive；宿主侧（`src/`）改动过 `pnpm check` + verify-vs-logs。渲染驱动用带钩子语义的迷你 React 渲染器驱动真实组件（数据态、页签切换、翻页、台账展开、价格导入全流程），驱动覆盖不了的（真实配色、主题跟随）明确标注"需实机确认"。
 
+文件约定：源码一律 UTF-8 + LF。**不要用 PowerShell 管道改写含中文的源文件**——`Get-Content`/`Set-Content` 在本机会按系统代码页（GBK）解码 UTF-8 再以 ANSI 写回，造成不可逆乱码（发生过一次，靠 git 基线 + 重放编辑恢复）。改中文文本用编辑工具或 Node 脚本（显式 `utf8`）。
+
 ## 安装与热更（宿主的模块代规则）
 
 - `plugin_manager` 的 `install_bundle` 安装本地目录（link 方式，源码即运行码）
@@ -35,7 +37,7 @@ node scripts/render-client.mjs      # 客户端组件树渲染驱动（改 clien
 
 ## 派生数据的收敛哲学
 
-账本（`usage_records`）是唯一事实源；`daily_stats` / `cost_entries` / 上下文水位都是可全量重建的派生值。所有修正路径（`llm/retry` 合并、元数据修正、参考价导入）都设计为"重放收敛"——重复执行零副作用，历史重导自动愈合（包括跨启动边界产生的重复行）。改写路径时保持这个性质，测试也要覆盖"修正后重放"。
+账本（`usage_records`）是唯一事实源；`daily_stats` / `cost_entries` / `context_observations` 都是可全量重建的派生值。所有修正路径（`llm/retry` 合并、元数据修正、参考价导入）都设计为"重放收敛"——重复执行零副作用，历史重导自动愈合（包括跨启动边界产生的重复行）。改写路径时保持这个性质，测试也要覆盖"修正后重放"。
 
 ## 仓库布局
 

@@ -84,16 +84,66 @@ function payloadFor(path) {
   }
   if (path.startsWith('/context')) {
     if (path.includes('sessionId=')) {
+      const id = decodeURIComponent(path.split('sessionId=')[1] ?? '');
+      if (id === 'session-dense') {
+        // 130 samples ≈ 5.1px spacing: unknown → 200k → unknown windows.
+        const t0 = 1794280000000;
+        const obs = [];
+        for (let i = 0; i < 130; i += 1) {
+          const window = i < 10 || i >= 120 ? null : 200_000;
+          const base = {
+            requestId: `session-dense:${i + 1}`, seq: i + 1, timestamp: t0 + i * 30_000,
+            provider: 'glm', model: 'glm-5.3', inputTokens: 5_000 + i * 40, missingMask: 0,
+            contextWindow: window, inputRaw: 5_000 + i * 40, cacheRead: 0, cacheWrite: 0,
+            outputTokens: 400, durationMs: 3_000, firstTokenLatencyMs: 700,
+            errorCode: null, costMicro: null, costCurrency: null,
+          };
+          if (i === 60) {
+            obs.push({
+              ...base, kind: 'compaction', inputTokens: null, inputRaw: null,
+              cacheRead: null, cacheWrite: null, outputTokens: 800, durationMs: 6_000,
+            });
+          } else {
+            obs.push({ ...base, kind: 'chat' });
+          }
+        }
+        return { sessionId: 'session-dense', observations: obs };
+      }
+      const t0 = 1794280000000;
+      const chat = (seq, inputTokens, over = {}) => ({
+        requestId: `session-x-1234567890:${seq}`, seq, timestamp: t0 + seq * 60_000,
+        provider: 'glm', model: 'glm-5.3', kind: 'chat', inputTokens, missingMask: 0,
+        contextWindow: 1_000_000, inputRaw: Math.round(inputTokens * 0.1),
+        cacheRead: inputTokens - Math.round(inputTokens * 0.1), cacheWrite: 0,
+        outputTokens: 500, durationMs: 4_000, firstTokenLatencyMs: 800,
+        errorCode: null, costMicro: null, costCurrency: null, ...over,
+      });
+      const compaction = (seq, over = {}) => ({
+        requestId: `session-x-1234567890:${seq}`, seq, timestamp: t0 + seq * 60_000,
+        provider: 'glm', model: 'glm-5.3-flash', kind: 'compaction', inputTokens: null,
+        missingMask: 0, contextWindow: 1_000_000, inputRaw: null, cacheRead: null,
+        cacheWrite: null, outputTokens: 900, durationMs: 8_500, firstTokenLatencyMs: null,
+        errorCode: null, costMicro: 300, costCurrency: 'USD', ...over,
+      });
       return {
         sessionId: 'session-x-1234567890',
-        observations: Array.from({ length: 12 }, (_, i) => ({
-          requestId: `session-x-1234567890:${10 + i * 7}`,
-          seq: 10 + i * 7,
-          timestamp: 1794280000000 + i * 60_000,
-          provider: 'glm', model: 'glm-5.3', kind: 'chat',
-          inputTokens: 20_000 + i * 9_000,
-          missingMask: 0, contextWindow: 1_000_000,
-        })),
+        observations: [
+          chat(10, 20_000),
+          chat(11, 30_000, { missingMask: 1, inputRaw: null }),
+          chat(12, 45_000, { model: 'glm-5.3-flash', costMicro: 1_500, costCurrency: 'USD' }),
+          compaction(13),
+          chat(14, 8_000, { model: 'glm-5.3-flash', contextWindow: 2_000_000 }),
+          {
+            requestId: 'session-x-1234567890:15', seq: 15, timestamp: t0 + 15 * 60_000,
+            provider: 'glm', model: 'glm-5.3-flash', kind: 'attempt', inputTokens: 9_000,
+            missingMask: 0, contextWindow: 2_000_000, inputRaw: 900, cacheRead: 8_100,
+            cacheWrite: 0, outputTokens: null, durationMs: 1_200, firstTokenLatencyMs: null,
+            errorCode: 'SERVER', costMicro: null, costCurrency: null,
+          },
+          chat(16, 9_500, { model: 'glm-5.3-flash', contextWindow: 2_000_000 }),
+          compaction(17, { durationMs: null, costMicro: null, costCurrency: null, contextWindow: 2_000_000 }),
+          chat(18, 3_000, { model: 'glm-5.3-flash', contextWindow: 2_000_000 }),
+        ],
       };
     }
     return {
@@ -104,6 +154,13 @@ function payloadFor(path) {
         prevInput: 90_000, delta: 29_000, modelSwitched: false,
         maxInput: 190_000, observedRequests: 40, totalRequests: 42,
         compactions: 1, contextWindow: 1_000_000, lastObsAt: 1794280000000,
+      }, {
+        sessionId: 'session-dense', title: 'Dense series', origin: null, parentSessionId: null,
+        model: 'glm-5.3',
+        lastInput: 9_160, lastInputAt: 1794280000000, lastRequestId: 'session-dense:130',
+        prevInput: 9_120, delta: 40, modelSwitched: false,
+        maxInput: 9_160, observedRequests: 129, totalRequests: 130,
+        compactions: 1, contextWindow: null, lastObsAt: 1794280000000,
       }],
     };
   }
@@ -385,6 +442,7 @@ assert.match(filterSelectText, /deepseek-account/, 'provider options populated')
 // Costs (unconfigured): unified table with per-category price columns ("–").
 await clickTab('费用');
 assert.match(textOf(tree), /模型用量/, 'unconfigured costs table rendered');
+assert.match(textOf(tree), /未配置价格/, 'pending notice guides to the reference-price button');
 assert.match(textOf(tree), /输入 \/1M/, 'input price column present');
 assert.match(textOf(tree), /输出 \/1M/, 'output price column present');
 assert.match(textOf(tree), /缓存读 \/1M/, 'cache-read price column present');
@@ -443,10 +501,157 @@ dirty = true;
 await settle();
 tree = renderDashboard();
 assert.match(textOf(tree), /seq 10/, 'context series chart rendered');
+assert.match(textOf(tree), /seq 18/, 'chart spans the whole series by default');
 assert.match(textOf(tree), /所选会话/, 'detail metrics bound to the clicked session');
 assert.match(textOf(tree), /历史最大输入/, 'max-input metric rendered');
 assert.match(textOf(tree), /较上次/, 'delta metric rendered');
-assert.match(textOf(tree), /窗口差额/, 'window headroom disclaimer rendered');
+assert.match(textOf(tree), /窗口剩余/, 'window headroom disclaimer rendered');
+
+// Diagnostics chrome: range selector, attempts layer, window segments.
+assert.match(textOf(tree), /最近 50/, 'range selector rendered');
+assert.match(textOf(tree), /全部/, 'all-range option rendered');
+assert.match(textOf(tree), /尝试\/重试/, 'attempts toggle rendered');
+assert.match(textOf(tree), /8 \/ 9/, 'attempts hidden by default');
+assert.match(textOf(tree), /100万/, 'first window segment labeled');
+assert.match(textOf(tree), /200万/, 'window drawn as segments, not one max line');
+assert.match(textOf(tree), /⇄/, 'model-switch marker rendered');
+assert.match(textOf(tree), /悬停查看数值/, 'persistent chart hint rendered');
+const compactionMarks = collectNodes(tree)
+  .filter((n) => n.tag === 'line' && n.props['stroke-dasharray'] === '2 3');
+assert.equal(compactionMarks.length, 2, 'both compactions carry a vertical mark');
+// Single overlay event layer: hover/click compute the NEAREST sample from
+// the mouse x (per-point strips overlapped below ~6px spacing and the
+// topmost strip silently selected the wrong request).
+const overlay = () => collectNodes(tree).find(
+  (n) => n.tag === 'rect' && typeof n.props.onMouseMove === 'function' && typeof n.props.onClick === 'function',
+);
+assert.ok(overlay() !== undefined, 'single overlay event layer present');
+assert.ok(
+  !collectNodes(tree).some((n) => n.tag === 'rect' && typeof n.props.onMouseEnter === 'function'),
+  'no per-point hit strips remain',
+);
+const evAt = (i, n) => ({
+  clientX: 52 + i * (660 / (n - 1)),
+  currentTarget: { getBoundingClientRect: () => ({ left: 0, width: 720 }) },
+});
+
+// Hover a point: tooltip with time/seq/model/input and delta.
+overlay().props.onMouseMove(evAt(2, 8)); // seq 12: switch point, delta +15,000
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /glm-5\.3-flash/, 'tooltip shows the model at the point');
+assert.match(textOf(tree), /\+1\.5万/, 'tooltip shows the delta vs previous request');
+assert.match(textOf(tree), /点击查看请求详情/, 'tooltip hints the drill-down');
+overlay().props.onMouseLeave();
+dirty = true;
+await settle();
+tree = renderDashboard();
+
+// Click a point: full request detail from the enriched observation row.
+overlay().props.onClick(evAt(2, 8));
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /请求详情 · seq 12/, 'drill-down panel pinned');
+assert.match(textOf(tree), /输入明细/, 'input breakdown present');
+assert.match(textOf(tree), /\$0\.0015/, 'per-request estimate joined from cost entries');
+assert.ok(collectNodes(tree).some((n) => n.tag === 'circle' && n.props.r === 5), 'pinned point marked on the chart');
+findButtonWithText(tree, '关闭').props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.ok(!textOf(tree).includes('请求详情 · seq 12'), 'drill-down closes');
+
+// Click a compaction mark: marker row, its duration and estimate.
+overlay().props.onClick(evAt(3, 8)); // seq 13 compaction
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /请求详情 · seq 13/, 'compaction drill-down pinned');
+assert.match(textOf(tree), /压缩点（无输入数据）/, 'marker flagged instead of a fake 0 input');
+assert.match(textOf(tree), /8\.5 s/, 'compaction duration joined');
+assert.match(textOf(tree), /\$0\.0003/, 'compaction estimate joined');
+findButtonWithText(tree, '关闭').props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+
+// Compaction diagnostics list: observed before/after drop, not "savings".
+assert.match(textOf(tree), /压缩诊断/, 'diagnostics section rendered');
+assert.match(textOf(tree), /压缩前后观测差额/, 'drop column labeled as observed difference');
+assert.match(textOf(tree), /不代表实际节省量/, 'not-savings disclaimer rendered');
+assert.match(textOf(tree), /\+3\.7万/, 'first drop 45,000 → 8,000');
+assert.match(textOf(tree), /18%/, 'first after/before ratio');
+assert.match(textOf(tree), /6500/, 'second drop 9,500 → 3,000');
+assert.match(textOf(tree), /32%/, 'second after/before ratio');
+
+// Attempts layer: toggle on, hollow dot, error badge on drill-down.
+findButtonWithText(tree, '尝试/重试').props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /9 \/ 9/, 'attempt joins the series when toggled');
+assert.ok(collectNodes(tree).some((n) => n.tag === 'circle' && n.props.fill === 'none'), 'attempt plotted as hollow dot');
+// seq 15 attempt (9 samples with the layer on), errorCode SERVER.
+overlay().props.onClick(evAt(5, 9));
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /请求详情 · seq 15/, 'attempt drill-down pinned');
+assert.match(textOf(tree), /SERVER/, 'failed attempt shows its error code');
+findButtonWithText(tree, '关闭').props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+
+// Range switching works and keeps the view consistent.
+findButtonWithText(tree, '全部').props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /9 \/ 9/, 'all-range keeps every sample');
+findButtonWithText(tree, '最近 50').props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /seq 10/, 'narrow range still renders the series');
+
+// Prominent back button at the top of the detail view returns to the overview.
+const backBtn = collectNodes(tree).find((n) => n.tag === 'button' && n.props.className === 'duc-backbtn');
+assert.ok(backBtn !== undefined, 'prominent back button rendered at the top');
+backBtn.props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /占窗口/, 'back button returns to the session overview');
+
+// Dense series (130 samples, ~5.1px spacing): nearest-point precision and
+// segment edges that stop at unknown-window regions.
+const denseRows = collectNodes(tree).filter((n) => n.tag === 'tr' && typeof n.props.onClick === 'function');
+assert.ok(denseRows.length >= 2, 'second session row present');
+denseRows[1].props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+findButtonWithText(tree, '全部').props.onClick(); // range state persists across sessions
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /130 \/ 130/, 'dense series fully visible');
+const segLines = collectNodes(tree).filter((n) => n.tag === 'line' && n.props['stroke-dasharray'] === '6 4');
+assert.ok(segLines.length >= 1, 'window segment rendered');
+const segX1 = Math.min(...segLines.map((l) => l.props.x1));
+const segX2 = Math.max(...segLines.map((l) => l.props.x2));
+assert.ok(segX1 > 55, `window segment stops before the leading unknown region (x1=${segX1.toFixed(1)})`);
+assert.ok(segX2 < 710, `window segment stops before the trailing unknown region (x2=${segX2.toFixed(1)})`);
+// Click 2.3px right of point 100 (spacing 5.1px): nearest-point math keeps
+// seq 101; the old 6px strips would have been covered by strip 101 there.
+overlay().props.onClick(evAt(100.45, 130));
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /请求详情 · seq 101/, 'nearest point wins where strips used to overlap');
 await clickTab('总览');
 
 // Trend dimension switch: provider view renders per-key legend.

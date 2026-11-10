@@ -106,7 +106,7 @@ window.__ModuleLoader__.load({
       'page.status': '{from}–{to} / {total}',
       'kind.chat': '对话',
       'kind.compaction': '压缩',
-      'kind.attempt': '尝试/失败',
+      'kind.attempt': '尝试/重试',
       'kind.other': '其他',
       'origin.subagent': '子代理',
       'origin.main': '主任务',
@@ -114,10 +114,10 @@ window.__ModuleLoader__.load({
       'status.ok': '完成',
       'status.error': '失败',
       'costs.basis': '模型用量',
-      'costs.pending': '费用估算尚未提供',
+      'costs.pending': '未配置价格 — 点「参考价…」导入后可估算',
       'costs.price': '单价 /1M',
       'costs.suggest': '参考价…',
-      'costs.imported': '参考价已写入配置，插件重载后生效',
+      'costs.imported': '参考价已写入配置，重启 DSH 后生效',
       'suggest.title': '导入参考价',
       'suggest.source': '来源：OpenRouter 公开价（USD / 1M tokens）',
       'suggest.disclaimer': '参考价仅供估算，不等于你的实际账单；只写入勾选的行。',
@@ -143,10 +143,38 @@ window.__ModuleLoader__.load({
       'context.maxInput': '历史最大输入',
       'context.modelSwitched': '期间切换过模型',
       'context.ofWindow': '占窗口',
-      'context.noWindow': '窗口未知（无声明）',
-      'context.windowNote': '窗口差额 ≠ 可安全使用的输入预算',
-      'context.observed': '观测/请求',
-      'context.noUsage': '无可观测用量',
+      'context.noWindow': '窗口未知（无窗口信息）',
+      'context.windowNote': '窗口剩余 ≠ 可安全使用的输入预算',
+      'context.observed': '有用量/全部请求',
+      'context.noUsage': '暂无用量数据',
+      'context.range50': '最近 50',
+      'context.range200': '最近 200',
+      'context.rangeAll': '全部',
+      'context.attempts': '尝试/重试',
+      'context.clickDetail': '点击查看请求详情',
+      'context.kindChat': '请求',
+      'context.kindAttempt': '尝试',
+      'context.kindCompaction': '压缩',
+      'context.markerNoInput': '压缩点（无输入数据）',
+      'context.missing': '部分用量缺失',
+      'context.duration': '耗时',
+      'context.latency': '首字延迟',
+      'context.errorCode': '错误',
+      'context.windowUnknown': '窗口未知',
+      'context.requestDetail': '请求详情',
+      'context.close': '关闭',
+      'context.inputDetail': '输入明细',
+      'context.estCost': '估算费用',
+      'context.requestId': '请求 ID',
+      'context.compactionDiag': '压缩诊断',
+      'context.beforeLast': '压缩前最后输入',
+      'context.afterFirst': '压缩后首次输入',
+      'context.obsDiff': '压缩前后观测差额',
+      'context.obsRatio': '比例',
+      'context.obsDiffNote': '差额与比例来自压缩前后两次输入的对比，不代表实际节省量；费用为估算，非账单',
+      'context.noCompactions': '无压缩记录',
+      'context.emptyHint': '插件记录到用量后此处显示会话',
+      'context.chartHint': '悬停查看数值 · 点击查看请求详情',
       'ledger.subagents': '子代理',
       'ledger.expand': '展开/收起子代理',
       'ledger.capped': '会话超过 200，仅显示前 {n} 个',
@@ -230,7 +258,7 @@ window.__ModuleLoader__.load({
       'page.status': '{from}–{to} / {total}',
       'kind.chat': 'Chat',
       'kind.compaction': 'Compaction',
-      'kind.attempt': 'Attempt',
+      'kind.attempt': 'Attempt/retry',
       'kind.other': 'Other',
       'origin.subagent': 'Subagent',
       'origin.main': 'Main',
@@ -238,10 +266,10 @@ window.__ModuleLoader__.load({
       'status.ok': 'OK',
       'status.error': 'Error',
       'costs.basis': 'Model usage',
-      'costs.pending': 'Cost estimates are not available yet',
+      'costs.pending': 'No prices configured — click "Reference prices…" to import',
       'costs.price': 'Price /1M',
       'costs.suggest': 'Reference prices…',
-      'costs.imported': 'Reference prices written to config; applies after the plugin reloads',
+      'costs.imported': 'Reference prices written to config; applies after DSH restarts',
       'suggest.title': 'Import reference prices',
       'suggest.source': 'Source: OpenRouter public prices (USD / 1M tokens)',
       'suggest.disclaimer': 'Reference prices are estimates only, not your actual bill; only checked rows are written.',
@@ -267,10 +295,38 @@ window.__ModuleLoader__.load({
       'context.maxInput': 'Max input',
       'context.modelSwitched': 'model changed in between',
       'context.ofWindow': 'of window',
-      'context.noWindow': 'Window unknown (no declaration)',
+      'context.noWindow': 'Window unknown (no window info)',
       'context.windowNote': 'window headroom is not a safe input budget',
-      'context.observed': 'observed/requests',
-      'context.noUsage': 'no observable usage',
+      'context.observed': 'with usage/all requests',
+      'context.noUsage': 'no usage data yet',
+      'context.range50': 'Last 50',
+      'context.range200': 'Last 200',
+      'context.rangeAll': 'All',
+      'context.attempts': 'Attempts/retries',
+      'context.clickDetail': 'Click for request detail',
+      'context.kindChat': 'Request',
+      'context.kindAttempt': 'Attempt',
+      'context.kindCompaction': 'Compaction',
+      'context.markerNoInput': 'compaction point (no input data)',
+      'context.missing': 'partial usage missing',
+      'context.duration': 'Duration',
+      'context.latency': 'First-token latency',
+      'context.errorCode': 'Error',
+      'context.windowUnknown': 'Window unknown',
+      'context.requestDetail': 'Request detail',
+      'context.close': 'Close',
+      'context.inputDetail': 'Input detail',
+      'context.estCost': 'Est. cost',
+      'context.requestId': 'Request ID',
+      'context.compactionDiag': 'Compaction diagnostics',
+      'context.beforeLast': 'Last input before',
+      'context.afterFirst': 'First input after',
+      'context.obsDiff': 'Observed before/after drop',
+      'context.obsRatio': 'Ratio',
+      'context.obsDiffNote': 'The drop and ratio compare the inputs right before and after a compaction; they are not actual savings, and cost figures are estimates, not bills.',
+      'context.noCompactions': 'No compaction records',
+      'context.emptyHint': 'sessions appear here once the plugin records usage',
+      'context.chartHint': 'Hover for values · Click for request detail',
       'ledger.subagents': 'sub-agents',
       'ledger.expand': 'Expand/collapse sub-agents',
       'ledger.capped': 'More than 200 sessions; showing first {n}',
@@ -514,6 +570,9 @@ window.__ModuleLoader__.load({
 .duc-range button[aria-pressed=true]{background:${colors.bgLayer2};color:inherit}
 .duc-iconbtn{border:1px solid ${colors.borderL1};background:${colors.bgLayer1};color:${colors.labelSecondary};border-radius:6px;padding:5px 10px;cursor:pointer;font:inherit}
 .duc-iconbtn:hover{color:inherit}
+.duc-iconbtn[aria-pressed=true]{border-color:${colors.brand};color:inherit}
+.duc-backbtn{display:inline-flex;align-items:center;gap:6px;border:1px solid ${colors.borderL2};background:${colors.bgLayer1};color:inherit;border-radius:8px;padding:7px 14px;cursor:pointer;font:inherit;font-weight:500}
+.duc-backbtn:hover{background:${colors.hoverBg}}
 .duc-body{flex:1;min-height:0;overflow:auto;padding:16px 20px 24px}
 .duc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px}
 .duc-card{min-width:0;border:1px solid ${colors.borderL1};border-radius:10px;padding:14px 16px}
@@ -555,6 +614,12 @@ select.duc-input{min-width:100px}
 .duc-legend span{display:inline-flex;align-items:center;gap:5px}
 .duc-swatch{width:10px;height:10px;border-radius:2px;display:inline-block}
 .duc-trend{width:100%;height:auto;display:block}
+.duc-chartwrap{position:relative}
+.duc-charttip{position:absolute;z-index:5;pointer-events:none;background:${colors.modalBg};color:${colors.modalText};border:1px solid ${colors.borderL2};border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.55;max-width:250px;box-shadow:0 6px 18px rgba(0,0,0,.2);transform:translate(-50%,-100%)}
+@media (prefers-color-scheme: dark){.duc-charttip{background:${colors.modalBgDark};color:${colors.modalTextDark}}}
+.duc-kv{display:grid;grid-template-columns:auto 1fr;gap:5px 18px;font-size:12.5px;margin:8px 0 0}
+.duc-kv dt{color:${colors.labelSecondary};white-space:nowrap}
+.duc-kv dd{margin:0;min-width:0;word-break:break-all}
 .duc-heatwrap{display:flex;gap:8px}
 .duc-heatgrid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);gap:3px;overflow-x:auto;padding-bottom:4px}
 .duc-cell{width:11px;height:11px;border-radius:2.5px;background:rgba(148,163,184,.25)}
@@ -585,7 +650,7 @@ select.duc-input{min-width:100px}
       );
     }
 
-    function StateView({ loading, error, empty, onRetry, t, children }) {
+    function StateView({ loading, error, empty, emptyText, onRetry, t, children }) {
       if (loading) return h('div', { className: 'duc-state' }, t('state.loading'));
       if (error !== null && error !== undefined) {
         return h('div', { className: 'duc-state' },
@@ -596,7 +661,7 @@ select.duc-input{min-width:100px}
           }, t('state.retry')) : null,
         );
       }
-      if (empty) return h('div', { className: 'duc-state' }, t('state.empty'));
+      if (empty) return h('div', { className: 'duc-state' }, emptyText ?? t('state.empty'));
       return children;
     }
 
@@ -1293,52 +1358,157 @@ select.duc-input{min-width:100px}
     }
 
 
-    /** Single-series context chart: token line against the window's dashed line. */
-    function ContextChart({ samples, windowTokens, t, fmt }) {
+    /**
+     * Per-observation diagnostic chart. One hit strip per visible sample
+     * (hover tooltip + click drill-down, no mouse-coordinate math), the chat
+     * input line, an optional attempts layer (hollow dots), model-switch
+     * markers (⇄), compaction marks (vertical dashed line) and the window
+     * drawn as SEGMENTS — one dashed line per declaration run, never one
+     * max-throughout line. Paints go through style props only; never
+     * color-mix() (rejected on SVG paints by this engine).
+     */
+    function ContextChart({ samples, t, fmt, pinnedId, onPin }) {
+      const [hover, setHover] = useState(null);
       const W = 720;
-      const H = 190;
+      const H = 210;
       const PAD_L = 52;
       const PAD_B = 18;
-      const PAD_T = 14;
+      const PAD_T = 16;
       const plotW = W - PAD_L - 8;
       const plotH = H - PAD_B - PAD_T;
-      const peak = Math.max(...samples.map((s) => s.contextTokens), 1);
-      const hasWindow = windowTokens !== null && windowTokens > 0;
-      // Scale to the data; include the window in scale only when it is near the peak,
-      // otherwise an idle session (peak 1% of window) squashes the line to the floor
-      // and pushes the window line+label outside the viewBox.
-      const windowScaled = hasWindow && windowTokens <= peak * 2 ? windowTokens : null;
+      let peak = 1;
+      for (const s of samples) {
+        if (s.kind !== 'compaction' && s.inputTokens !== null && s.inputTokens > peak) peak = s.inputTokens;
+      }
+      const maxWindow = samples.reduce((m, s) => Math.max(m, s.contextWindow ?? 0), 0);
+      const hasWindow = maxWindow > 0;
+      // Include the window in the scale only when it is near the data, so an
+      // idle session is not squashed to the floor.
+      const windowScaled = hasWindow && maxWindow <= peak * 2 ? maxWindow : null;
       const maxTokens = Math.max(peak * 1.1, windowScaled ?? 0, 1);
       const step = samples.length > 1 ? plotW / (samples.length - 1) : 0;
       const x = (i) => PAD_L + i * step;
       const y = (v) => PAD_T + plotH - (v / maxTokens) * plotH;
-      const points = samples.map((s, i) => `${x(i)},${y(s.contextTokens)}`).join(' ');
-      const first = samples[0];
-      const last = samples[samples.length - 1];
-      // The dashed window line: at its true height when scaled, pinned to the top
-      // edge (meaning "above the plotted range") when the window far exceeds the peak.
-      const windowLineY = windowScaled !== null ? y(windowScaled) : PAD_T;
-      const windowLabelY = Math.min(windowLineY + 13, PAD_T + plotH - 2);
-      return h('svg', {
-        className: 'duc-trend', viewBox: `0 0 ${W} ${H}`,
-        role: 'img', 'aria-label': t('context.series'),
-      },
-        [0, 0.5, 1].map((ratio) => h('g', { key: ratio },
-          h('line', { x1: PAD_L, x2: W - 8, y1: y(maxTokens * ratio), y2: y(maxTokens * ratio), strokeWidth: 1, style: { stroke: C.borderL1 } }),
-          h('text', { x: PAD_L - 6, y: y(maxTokens * ratio) + 4, 'text-anchor': 'end', 'font-size': 10, style: { fill: C.labelSecondary } }, fmt.compact(maxTokens * ratio)),
-        )),
-        hasWindow
-          ? h('g', null,
-              h('line', { x1: PAD_L, x2: W - 8, y1: windowLineY, y2: windowLineY, strokeWidth: 1, 'stroke-dasharray': '6 4', style: { stroke: C.warn } }),
-              h('text', { x: W - 10, y: windowLabelY, 'text-anchor': 'end', 'font-size': 10, style: { fill: C.warn } },
-                `${t('context.window')} ${fmt.compact(windowTokens)}${windowScaled !== null ? '' : ' ↑'}`),
+      // Nearest sample from a mouse position — the ONLY hit mechanism. Per-
+      // point strips overlap once spacing drops below their width and the
+      // topmost (later) strip wins, silently selecting the wrong request.
+      const nearestIndex = (clientX, target) => {
+        const rect = target.getBoundingClientRect();
+        const xSvg = ((clientX - rect.left) / rect.width) * W;
+        const i = Math.round((xSvg - PAD_L) / (step || 1));
+        return Math.max(0, Math.min(samples.length - 1, i));
+      };
+      const kindLabel = (s) => s.kind === 'compaction' ? t('context.kindCompaction')
+        : s.kind === 'attempt' ? t('context.kindAttempt') : t('context.kindChat');
+      // Chat input polyline (attempts stay as isolated dots).
+      const linePts = [];
+      let lastChat = null;
+      samples.forEach((s, i) => {
+        if (s.kind === 'chat' && s.inputTokens !== null) {
+          linePts.push(`${x(i)},${y(s.inputTokens)}`);
+          lastChat = { i, s };
+        }
+      });
+      // Window segments: maximal runs of the same declared window.
+      const segs = [];
+      let cur = null;
+      samples.forEach((s, i) => {
+        const w = s.contextWindow;
+        if (w === null || w === undefined) { cur = null; return; }
+        if (cur === null || cur.w !== w) { cur = { w, from: i, to: i }; segs.push(cur); }
+        else cur.to = i;
+      });
+      const hoverSample = hover === null ? null : samples[hover] ?? null;
+      const pinnedIndex = pinnedId === null ? -1
+        : samples.findIndex((s) => s.requestId === pinnedId);
+      const hoverY = hoverSample !== null && hoverSample.kind !== 'compaction'
+        && hoverSample.inputTokens !== null ? y(hoverSample.inputTokens) : PAD_T + plotH / 2;
+      const tipLeft = `${Math.min(Math.max(((hover === null ? PAD_L : x(hover)) / W) * 100, 12), 84)}%`;
+      const tipTop = `${Math.max((hoverY - 8) / H, 0.06) * 100}%`;
+      return h('div', { className: 'duc-chartwrap' },
+        h('svg', {
+          className: 'duc-trend', viewBox: `0 0 ${W} ${H}`,
+          role: 'img', 'aria-label': t('context.series'),
+        },
+          [0, 0.5, 1].map((ratio) => h('g', { key: ratio },
+            h('line', { x1: PAD_L, x2: W - 8, y1: y(maxTokens * ratio), y2: y(maxTokens * ratio), strokeWidth: 1, style: { stroke: C.borderL1 } }),
+            h('text', { x: PAD_L - 6, y: y(maxTokens * ratio) + 4, 'text-anchor': 'end', 'font-size': 10, style: { fill: C.labelSecondary } }, fmt.compact(maxTokens * ratio)),
+          )),
+          segs.map((seg, k) => {
+            const segY = seg.w <= maxTokens ? y(seg.w) : PAD_T;
+            // Segment edges come from the segment's OWN samples. A segment
+            // reaches the chart edge only when it really contains the first
+            // or last sample — never stretching into unknown-window regions.
+            const x1 = seg.from === 0 ? PAD_L : Math.max(PAD_L, x(seg.from) - step / 2);
+            const x2 = seg.to === samples.length - 1 ? W - 8 : Math.min(W - 8, x(seg.to) + step / 2);
+            const width = x2 - x1;
+            return h('g', { key: `seg${k}` },
+              h('line', { x1, x2, y1: segY, y2: segY, strokeWidth: 1, 'stroke-dasharray': '6 4', style: { stroke: C.warn } },
+                h('title', null, `${t('context.window')} ${fmt.compact(seg.w)}${seg.w > maxTokens ? ' ↑' : ''}`)),
+              width > 64
+                ? h('text', { x: x1 + 4, y: Math.min(segY + 12, PAD_T + plotH - 2), 'font-size': 10, style: { fill: C.warn } },
+                    `${fmt.compact(seg.w)}${seg.w > maxTokens ? ' ↑' : ''}`)
+                : null,
+            );
+          }),
+          samples.map((s, i) => (s.kind === 'compaction'
+            ? h('g', { key: `cmp${i}` },
+                h('line', { x1: x(i), x2: x(i), y1: PAD_T, y2: PAD_T + plotH, strokeWidth: 1, 'stroke-dasharray': '2 3', style: { stroke: C.error, opacity: 0.75 } },
+                  h('title', null, `${t('context.kindCompaction')} · ${fmt.dateTime(s.timestamp)}${s.durationMs !== null && s.durationMs !== undefined ? ` · ${t('context.duration')} ${fmt.ms(s.durationMs)}` : ''}`)),
+                h('circle', { cx: x(i), cy: PAD_T - 6, r: 2.5, style: { fill: C.error } }),
+              )
+            : null)),
+          linePts.length > 1 ? h('polyline', { points: linePts.join(' '), fill: 'none', strokeWidth: 1.6, style: { stroke: C.brand } }) : null,
+          lastChat !== null
+            ? h('circle', { cx: x(lastChat.i), cy: y(lastChat.s.inputTokens), r: 3, style: { fill: C.brand } },
+                h('title', null, `${fmt.int(lastChat.s.inputTokens)} tokens @ seq ${lastChat.s.seq}`))
+            : null,
+          samples.map((s, i) => (s.kind === 'attempt' && s.inputTokens !== null
+            ? h('circle', { key: `att${i}`, cx: x(i), cy: y(s.inputTokens), r: 2.5, fill: 'none', strokeWidth: 1.2, style: { stroke: C.labelSecondary } }) : null)),
+          samples.map((s, i) => (s.switched === true
+            ? h('text', { key: `sw${i}`, x: x(i), y: Math.max(y(s.inputTokens) - 8, PAD_T + 8), 'font-size': 11, 'text-anchor': 'middle', style: { fill: C.warn } }, '⇄',
+                h('title', null, `${s.prevModel ?? '?'} → ${s.model ?? '?'}`)) : null)),
+          hoverSample !== null
+            ? h('g', { key: 'hover', pointerEvents: 'none' },
+                h('line', { x1: x(hover), x2: x(hover), y1: PAD_T, y2: PAD_T + plotH, strokeWidth: 1, style: { stroke: C.brand, opacity: 0.45 } }),
+                hoverSample.kind !== 'compaction' && hoverSample.inputTokens !== null
+                  ? h('circle', { cx: x(hover), cy: y(hoverSample.inputTokens), r: 3.5, style: { fill: C.brand } }) : null,
+              ) : null,
+          pinnedIndex >= 0
+            ? h('circle', { key: 'pin', cx: x(pinnedIndex), cy: samples[pinnedIndex].kind !== 'compaction' && samples[pinnedIndex].inputTokens !== null ? y(samples[pinnedIndex].inputTokens) : PAD_T + plotH / 2, r: 5, fill: 'none', strokeWidth: 2, style: { stroke: C.brand }, pointerEvents: 'none' })
+            : null,
+          h('text', { x: PAD_L, y: H - 4, 'font-size': 10, style: { fill: C.labelSecondary } }, `seq ${samples[0].seq}`),
+          h('text', { x: W - 8, y: H - 4, 'text-anchor': 'end', 'font-size': 10, style: { fill: C.labelSecondary } }, `seq ${samples[samples.length - 1].seq}`),
+          // Single transparent event layer for hover + click across the plot.
+          h('rect', {
+            x: PAD_L, y: PAD_T, width: plotW, height: plotH,
+            style: { fill: 'transparent', cursor: 'pointer' },
+            onMouseMove: (e) => setHover(nearestIndex(e.clientX, e.currentTarget)),
+            onMouseLeave: () => setHover(null),
+            onClick: (e) => onPin(samples[nearestIndex(e.clientX, e.currentTarget)].requestId),
+          }),
+        ),
+        hoverSample !== null
+          ? h('div', { className: 'duc-charttip', style: { left: tipLeft, top: tipTop } },
+              h('div', null, fmt.dateTime(hoverSample.timestamp)),
+              h('div', null,
+                `seq ${hoverSample.seq} · ${kindLabel(hoverSample)} · ${hoverSample.model ?? '?'}`),
+              h('div', null,
+                hoverSample.kind === 'compaction'
+                  ? t('context.markerNoInput')
+                  : `${t('context.lastInput')} ${fmt.compact(hoverSample.inputTokens)}`),
+              hoverSample.kind === 'chat'
+                ? h('div', null,
+                    `${t('context.delta')} ${hoverSample.delta === null ? '–'
+                      : `${hoverSample.delta >= 0 ? '+' : ''}${fmt.compact(hoverSample.delta)}`}`,
+                    hoverSample.missingMask > 0 ? h('span', { className: 'duc-badge', style: { marginLeft: 6 } }, t('context.missing')) : null)
+                : null,
+              h('div', null,
+                hoverSample.contextWindow === null ? t('context.windowUnknown')
+                  : `${t('context.window')} ${fmt.compact(hoverSample.contextWindow)}`),
+              h('div', { className: 'duc-muted' }, t('context.clickDetail')),
             )
           : null,
-        h('polyline', { points, fill: 'none', strokeWidth: 1.6, style: { stroke: C.brand } }),
-        h('circle', { cx: x(samples.length - 1), cy: y(last.contextTokens), r: 3, style: { fill: C.brand } },
-          h('title', null, `${fmt.int(last.contextTokens)} tokens @ seq ${last.seq}`)),
-        h('text', { x: PAD_L, y: H - 4, 'font-size': 10, style: { fill: C.labelSecondary } }, `seq ${first.seq}`),
-        h('text', { x: W - 8, y: H - 4, 'text-anchor': 'end', 'font-size': 10, style: { fill: C.labelSecondary } }, `seq ${last.seq}`),
       );
     }
 
@@ -1359,6 +1529,9 @@ select.duc-input{min-width:100px}
       // window ratio stays secondary and is never a "remaining budget".
       const [selected, setSelected] = useState(null);
       const [expanded, setExpanded] = useState({});
+      const [range, setRange] = useState(200);
+      const [showAttempts, setShowAttempts] = useState(false);
+      const [pinnedId, setPinnedId] = useState(null);
       const overview = useLoad(
         () => [['ctx', selected === null ? api('/context') : Promise.resolve({})]],
         [selected === null],
@@ -1370,20 +1543,70 @@ select.duc-input{min-width:100px}
 
       if (selected !== null) {
         const row = selected.row;
-        const observations = (detail.data?.d?.observations ?? [])
-          .filter((o) => o.kind === 'chat' && o.inputTokens !== null);
-        const chartSamples = observations.map((o) => ({ seq: o.seq, contextTokens: o.inputTokens }));
-        const windowTokens = observations.length > 0
-          ? observations[observations.length - 1].contextWindow
-          : null;
+        const observations = detail.data?.d?.observations ?? [];
+        // Delta / model-switch over the FULL chat series, computed before any
+        // range slicing so the first visible point still knows its previous.
+        const chatMeta = new Map();
+        let prevChat = null;
+        for (const o of observations) {
+          if (o.kind !== 'chat' || o.inputTokens === null) continue;
+          chatMeta.set(o.requestId, {
+            delta: prevChat === null ? null : o.inputTokens - prevChat.inputTokens,
+            switched: prevChat !== null && prevChat.model !== null && o.model !== null && o.model !== prevChat.model,
+            prevModel: prevChat === null ? null : prevChat.model,
+          });
+          prevChat = o;
+        }
+        const plainMeta = { delta: null, switched: false, prevModel: null };
+        const layered = showAttempts ? observations : observations.filter((o) => o.kind !== 'attempt');
+        const visible = range === 0 ? layered : layered.slice(-range);
+        const samples = visible.map((o) => ({ ...o, ...(chatMeta.get(o.requestId) ?? plainMeta) }));
+        // Compaction diagnostics over the full series: pair each marker with
+        // the last input observed before it and the first after it. The drop
+        // is an observed difference, never a "savings" claim.
+        const diag = observations.filter((o) => o.kind === 'compaction')
+          .map((m) => ({ m, before: null, after: null }));
+        {
+          let k = 0;
+          let last = null;
+          for (const o of observations) {
+            if (o.kind === 'compaction') { diag[k].before = last; k += 1; }
+            else if (o.kind === 'chat' && o.inputTokens !== null) last = o.inputTokens;
+          }
+        }
+        {
+          let k = diag.length - 1;
+          let next = null;
+          for (let i = observations.length - 1; i >= 0; i -= 1) {
+            const o = observations[i];
+            if (o.kind === 'compaction') { diag[k].after = next; k -= 1; }
+            else if (o.kind === 'chat' && o.inputTokens !== null) next = o.inputTokens;
+          }
+        }
+        const pinned = pinnedId === null
+          ? null : observations.find((o) => o.requestId === pinnedId) ?? null;
+        const pinnedMeta = pinned === null ? plainMeta : chatMeta.get(pinned.requestId) ?? plainMeta;
         const ratio = row.lastInput !== null && row.contextWindow !== null
           ? row.lastInput / row.contextWindow : null;
+        const kindLabel = (o) => o.kind === 'compaction' ? t('context.kindCompaction')
+          : o.kind === 'attempt' ? t('context.kindAttempt') : t('context.kindChat');
+        const num = (v) => (v === null || v === undefined ? '–' : fmt.compact(v));
+        const money = (o) => (o.costMicro === null || o.costMicro === undefined
+          ? '–' : fmt.money(o.costMicro, o.costCurrency ?? 'USD'));
         return h(StateView, {
           loading: detail.loading, error: detail.error,
-          empty: !detail.loading && observations.length === 0, onRetry: detail.refresh, t,
+          empty: !detail.loading && observations.length === 0,
+          emptyText: t('context.noUsage'),
+          onRetry: detail.refresh, t,
         },
-          h('div', { className: 'duc-small duc-muted', style: { marginBottom: 8 } },
-            `${t('context.selected')} · ${sessionName(row)}`),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 } },
+            h('button', {
+              type: 'button', className: 'duc-backbtn',
+              onClick: () => setSelected(null),
+            }, `← ${t('context.back')}`),
+            h('span', { className: 'duc-small duc-muted' },
+              `${t('context.selected')} · ${sessionName(row)}`),
+          ),
           h('div', { className: 'duc-grid' },
             h(StatCard, {
               title: t('context.lastInput'),
@@ -1413,15 +1636,98 @@ select.duc-input{min-width:100px}
           h('div', { className: 'duc-section' },
             h('div', { className: 'duc-section-head' },
               h('h3', { className: 'duc-section-title' }, t('context.series')),
-              h('button', {
-                type: 'button', className: 'duc-iconbtn',
-                onClick: () => setSelected(null),
-              }, `← ${t('context.back')}`),
             ),
-            chartSamples.length > 0
-              ? h(ContextChart, { samples: chartSamples, windowTokens, t, fmt })
+            h('div', { className: 'duc-filters' },
+              h('div', { className: 'duc-range', role: 'group' },
+                [50, 200, 0].map((r) => h('button', {
+                  key: r, type: 'button', 'aria-pressed': String(range === r),
+                  onClick: () => setRange(r),
+                }, r === 0 ? t('context.rangeAll') : t(`context.range${r}`)))),
+              h('button', {
+                type: 'button', className: 'duc-iconbtn', 'aria-pressed': String(showAttempts),
+                onClick: () => setShowAttempts((v) => !v),
+              }, t('context.attempts')),
+              h('span', { className: 'duc-small duc-muted' }, `${fmt.int(samples.length)} / ${fmt.int(observations.length)}`),
+            ),
+            samples.length > 0
+              ? h(ContextChart, { samples, t, fmt, pinnedId, onPin: setPinnedId })
               : h('div', { className: 'duc-state' }, t('context.noUsage')),
+            samples.length > 0
+              ? h('div', { className: 'duc-small duc-muted', style: { marginTop: 6 } }, t('context.chartHint'))
+              : null,
+            pinned !== null
+              ? h('div', { className: 'duc-card', style: { marginTop: 12 } },
+                  h('div', { className: 'duc-section-head' },
+                    h('span', { className: 'duc-section-title' },
+                      `${t('context.requestDetail')} · seq ${pinned.seq}`),
+                    h('button', {
+                      type: 'button', className: 'duc-iconbtn',
+                      onClick: () => setPinnedId(null),
+                    }, t('context.close')),
+                  ),
+                  h('dl', { className: 'duc-kv' },
+                    h('dt', null, t('table.time')), h('dd', null, fmt.dateTime(pinned.timestamp)),
+                    h('dt', null, t('table.model')),
+                      h('dd', null, `${pinned.provider ?? '?'} / ${pinned.model ?? '?'}`),
+                    h('dt', null, t('table.kind')),
+                      h('dd', null, kindLabel(pinned),
+                        pinned.errorCode !== null && pinned.errorCode !== undefined
+                          ? h('span', { className: 'duc-badge err', style: { marginLeft: 6 } },
+                              `${t('context.errorCode')} ${pinned.errorCode}`) : null),
+                    h('dt', null, t('context.inputDetail')),
+                      h('dd', null,
+                        pinned.kind === 'compaction' ? t('context.markerNoInput')
+                          : `${t('table.input')} ${num(pinned.inputRaw)} · ${t('table.cacheRead')} ${num(pinned.cacheRead)} · ${t('table.cacheWrite')} ${num(pinned.cacheWrite)}`,
+                        pinned.missingMask > 0
+                          ? h('span', { className: 'duc-badge', style: { marginLeft: 6 } }, t('context.missing')) : null),
+                    h('dt', null, t('table.output')), h('dd', null, num(pinned.outputTokens)),
+                    h('dt', null, t('context.duration')), h('dd', null, fmt.ms(pinned.durationMs)),
+                    h('dt', null, t('context.latency')), h('dd', null, fmt.ms(pinned.firstTokenLatencyMs)),
+                    h('dt', null, t('context.delta')),
+                      h('dd', null, pinned.kind !== 'chat' || pinnedMeta.delta === null ? '–'
+                        : `${pinnedMeta.delta >= 0 ? '+' : ''}${fmt.compact(pinnedMeta.delta)}`),
+                    h('dt', null, t('context.window')),
+                      h('dd', null, pinned.contextWindow === null ? t('context.windowUnknown') : fmt.compact(pinned.contextWindow)),
+                    h('dt', null, t('context.estCost')), h('dd', null, money(pinned)),
+                    h('dt', null, t('context.requestId')),
+                      h('dd', { title: pinned.requestId }, pinned.requestId),
+                  ),
+                ) : null,
           ),
+          diag.length > 0
+            ? h('div', { className: 'duc-section' },
+                h('div', { className: 'duc-section-head' },
+                  h('h3', { className: 'duc-section-title' }, t('context.compactionDiag')),
+                  h('span', { className: 'duc-small duc-muted' }, fmt.int(diag.length)),
+                ),
+                h('div', { className: 'duc-small duc-muted', style: { marginBottom: 8 } }, t('context.obsDiffNote')),
+                h('div', { className: 'duc-tablewrap' },
+                  h('table', { className: 'duc-table' },
+                    h('thead', null, h('tr', null,
+                      h('th', null, t('table.time')),
+                      h('th', { className: 'num' }, t('context.beforeLast')),
+                      h('th', { className: 'num' }, t('context.afterFirst')),
+                      h('th', { className: 'num' }, t('context.obsDiff')),
+                      h('th', { className: 'num', title: t('context.afterFirst') }, t('context.obsRatio')),
+                      h('th', { className: 'num' }, t('context.duration')),
+                      h('th', { className: 'num' }, `≈ ${t('table.cost')}`),
+                    )),
+                    h('tbody', null, diag.slice().reverse().map(({ m, before, after }) => {
+                      const drop = before !== null && after !== null ? before - after : null;
+                      const afterRatio = before !== null && after !== null && before > 0 ? after / before : null;
+                      return h('tr', { key: m.requestId, title: m.requestId },
+                        h('td', null, fmt.dateTime(m.timestamp)),
+                        h('td', { className: 'num' }, num(before)),
+                        h('td', { className: 'num' }, num(after)),
+                        h('td', { className: 'num' }, drop === null ? '–' : `${drop >= 0 ? '+' : ''}${fmt.compact(drop)}`),
+                        h('td', { className: 'num' }, afterRatio === null ? '–' : `${(afterRatio * 100).toFixed(0)}%`),
+                        h('td', { className: 'num' }, fmt.ms(m.durationMs)),
+                        h('td', { className: 'num' }, money(m)),
+                      );
+                    })),
+                  ),
+                ),
+              ) : null,
         );
       }
 
@@ -1487,7 +1793,9 @@ select.duc-input{min-width:100px}
       };
       return h(StateView, {
         loading: overview.loading, error: overview.error,
-        empty: !overview.loading && sessions.length === 0, onRetry: overview.refresh, t,
+        empty: !overview.loading && sessions.length === 0,
+        emptyText: `${t('state.empty')} — ${t('context.emptyHint')}`,
+        onRetry: overview.refresh, t,
       },
         h('div', { className: 'duc-section' },
           h('div', { className: 'duc-tablewrap' },
