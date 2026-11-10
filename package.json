@@ -1,10 +1,13 @@
 {
   "name": "dsh-usage-center",
-  "version": "0.2.0",
+  "version": "0.6.2",
   "private": true,
   "description": "Unified LLM usage statistics, request analytics, cost tracking and token ledger for DeepSeek Harness",
   "type": "module",
   "main": "lib/index.js",
+  "bin": {
+    "usage-center": "./bin/usage-center.mjs"
+  },
   "exports": {
     ".": {
       "default": "./lib/index.js"
@@ -26,6 +29,7 @@
   "files": [
     "lib",
     "client",
+    "bin",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",

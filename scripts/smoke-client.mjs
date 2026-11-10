@@ -11,6 +11,20 @@
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+
+// Static gate: color-mix() is permanently banned from the panel (this engine
+// rejects it on SVG paints and everything falls back to black). Theme tokens
+// are ALLOWED only through the adaptive probe path (buildColors/themeTokens-
+// Reachable) so literal mode remains the guaranteed fallback.
+{
+  const source = readFileSync(resolve('client/index.js'), 'utf8');
+  const codeOnly = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  assert.ok(!codeOnly.includes('color-mix('), 'panel code must not use color-mix()');
+  assert.ok(codeOnly.includes('themeTokensReachable'), 'adaptive theme probe present');
+  assert.ok(codeOnly.includes('buildColors'), 'adaptive color builder present');
+  assert.ok(codeOnly.includes("style.dataset.theme"), 'theme mode stamped on the style tag');
+}
 
 const loads = [];
 const styleTags = [];
@@ -27,7 +41,14 @@ globalThis.document = {
     };
   },
   head: { appendChild(tag) { styleTags.push(tag); } },
+  documentElement: {},
 };
+// Themed-mode probe: the stub reports a reachable brand token, so this
+// harness exercises the var(--token, literal) path (the render drive runs
+// without getComputedStyle and covers the literal path).
+globalThis.getComputedStyle = () => ({
+  getPropertyValue: (name) => (name === '--dsw-alias-brand-primary' ? '#123456' : ''),
+});
 
 const fakeReact = {
   createElement(type, props, ...children) {
@@ -97,6 +118,9 @@ mod.apply(ctx);
 // Locale + style effects were installed with cleanups.
 assert.equal(styleTags.length, 1, 'one style tag appended');
 assert.equal(styleTags[0].dataset.plugin, 'dsh-usage-center');
+assert.equal(styleTags[0].dataset.theme, 'on', 'probe detects the reachable token');
+assert.ok(styleTags[0].textContent.includes('var(--dsw-alias-brand-primary'), 'themed css uses token with fallback');
+assert.ok(styleTags[0].textContent.includes('#c3d0f7') === false, 'themed css does not use the literal-only ramp');
 assert.ok(effects.some((e) => typeof e.cleanup === 'function' && /locale/.test(e.label ?? '')));
 
 // sidebar.panellist: data options + glyph component ({size, active} props).

@@ -13,7 +13,7 @@ import type {
   TrendPoint,
   UsageTotals,
 } from '../domain/types.js';
-import type { UsageDatabase } from '../storage/database.js';
+import { UsageDatabase } from '../storage/database.js';
 import { toCsv } from '../domain/csv.js';
 
 export interface UsageFilters {
@@ -66,18 +66,25 @@ export class QueryService {
 
   summary(filters: UsageFilters = {}): SummaryResult {
     const todayStart = startOfLocalDay(Date.now());
+    // "Today" intersects the caller's window instead of overriding it: with
+    // from/to set, the today figures stay inside the requested range.
+    const todayFrom = Math.max(todayStart, filters.from ?? todayStart);
+    const todayTo = filters.to !== undefined && filters.to < todayStart
+      ? filters.to // range ends before today: keep it, totals will be empty
+      : filters.to;
     const ledgerRow = this.store.db
       .prepare('SELECT COUNT(*) AS c, MIN(timestamp) AS first, MAX(timestamp) AS last FROM usage_records')
       .get() as { c: number; first: number | null; last: number | null };
+    const { clause, params } = UsageDatabase.WHERE(filters);
     const kinds = this.store.db
       .prepare(
         'SELECT kind, COUNT(*) AS requests, SUM(total_tokens) AS total_tokens ' +
-          'FROM usage_records GROUP BY kind ORDER BY requests DESC',
+          `FROM usage_records${clause} GROUP BY kind ORDER BY requests DESC`,
       )
-      .all() as Array<{ kind: string; requests: number; total_tokens: number | null }>;
+      .all(...params) as Array<{ kind: string; requests: number; total_tokens: number | null }>;
     return {
       totals: this.store.totals(filters),
-      today: this.store.totals({ ...filters, from: todayStart }),
+      today: this.store.totals({ ...filters, from: todayFrom, to: todayTo }),
       byModel: this.store.byModel(filters),
       byKind: kinds.map((k) => ({
         kind: k.kind,
@@ -98,7 +105,7 @@ export class QueryService {
         lastTimestamp: ledgerRow.last ?? null,
       },
       costs: this.store.listPriceLists().length > 0
-        ? this.store.costAggregates().byCurrency
+        ? this.store.costAggregates(filters).byCurrency
         : null,
     };
   }
@@ -122,6 +129,11 @@ export class QueryService {
   /** Daily trend over the last `days` local days (zero-filled). */
   trend(days?: number): TrendPoint[] {
     return this.store.trend(days ?? 30);
+  }
+
+  /** Per-series daily trend grouped by provider or model (top keys + rest). */
+  trendSeries(by: 'provider' | 'model', days?: number): Array<{ key: string; points: Array<{ day: string; totalTokens: number }> }> {
+    return this.store.trendSeries(by, days ?? 30);
   }
 
   /** Requests grouped by `model` | `provider` | `kind`. */
@@ -151,6 +163,73 @@ export class QueryService {
   prices(): { configured: boolean; lists: ReturnType<UsageDatabase['listPriceLists']> } {
     const lists = this.store.listPriceLists();
     return { configured: lists.length > 0, lists };
+  }
+
+  // -------------------------------------------------------------------------
+  // Context monitor.
+
+  /** Latest context state per session, or one session's sample series. */
+  context(sessionId?: string): {
+    sessions?: ReturnType<UsageDatabase['contextSessions']>;
+    sessionId?: string;
+    samples?: ReturnType<UsageDatabase['contextSamples']>;
+  } {
+    if (sessionId !== undefined && sessionId.length > 0) {
+      return { sessionId, samples: this.store.contextSamples(sessionId) };
+    }
+    return { sessions: this.store.contextSessions() };
+  }
+
+  /** Compact multi-line usage summary (slash command / agent tool). */
+  usageText(scope: 'summary' | 'today' | 'models' | 'context' = 'summary'): string {
+    const compact = (n: number): string =>
+      new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
+    const lines: string[] = [];
+    if (scope === 'context') {
+      const rows = this.store.contextSessions().slice(0, 8);
+      lines.push('context monitor (latest per session):');
+      for (const row of rows) {
+        const pct = row.contextTokens !== null && row.contextWindow
+          ? ` (${Math.round((row.contextTokens / row.contextWindow) * 100)}% of ${compact(row.contextWindow)})`
+          : '';
+        lines.push(
+          `- ${row.sessionId.slice(0, 16)}… ${row.provider ?? '?'}/${row.model ?? '?'}: ` +
+            `${row.contextTokens === null ? 'unknown' : compact(row.contextTokens)} tokens${pct}` +
+            (row.compactions > 0 ? ` · ${row.compactions} compaction(s)` : ''),
+        );
+      }
+      if (rows.length === 0) lines.push('- no context samples yet');
+      return lines.join('\n');
+    }
+    const summary = this.summary();
+    if (scope === 'models') {
+      lines.push('usage by model (all time):');
+      for (const row of summary.byModel.slice(0, 8)) {
+        lines.push(`- ${row.provider ?? '?'}/${row.model ?? '?'}: ${row.requests} requests · ${compact(row.totalTokens)} tokens`);
+      }
+      return lines.join('\n');
+    }
+    const source = scope === 'today' ? summary.today : summary.totals;
+    const label = scope === 'today' ? 'today' : 'all time';
+    lines.push(
+      `usage ${label}: ${source.requests} requests · ${compact(source.totalTokens)} tokens` +
+        (source.cacheHitRate !== null ? ` · cache hit ${(source.cacheHitRate * 100).toFixed(1)}%` : ''),
+    );
+    lines.push(
+      `tokens: in ${compact(source.inputTokens)} / out ${compact(source.outputTokens)} / ` +
+        `cache read ${compact(source.cacheReadTokens)} / cache write ${compact(source.cacheWriteTokens)}`,
+    );
+    if (scope !== 'today') {
+      for (const row of summary.byModel.slice(0, 3)) {
+        lines.push(`- ${row.provider ?? '?'}/${row.model ?? '?'}: ${compact(row.totalTokens)} tokens`);
+      }
+      if (summary.costs !== null) {
+        for (const cost of summary.costs) {
+          lines.push(`- estimated cost: ${(cost.totalMicro / 1e6).toFixed(4)} ${cost.currency} (estimate, not a bill)`);
+        }
+      }
+    }
+    return lines.join('\n');
   }
 
   /** Aggregated estimated costs, or `configured: false` with no prices. */

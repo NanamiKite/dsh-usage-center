@@ -75,6 +75,8 @@ export interface SessionRow {
   seedLength: number | null;
   /** Highest event seq ingested for this session. */
   lastSeq: number | null;
+  /** Human title from `session/title` events, when observed. */
+  title: string | null;
   updatedAt: number;
 }
 
@@ -174,6 +176,7 @@ export interface BreakdownRow {
 /** Per-session usage summary (ledger view). */
 export interface SessionSummaryRow {
   sessionId: string;
+  title: string | null;
   createdAt: number | null;
   cwd: string | null;
   origin: string | null;
@@ -213,6 +216,8 @@ export interface CostByModelRow {
   totalTokens: number;
   totalMicro: number;
   missingCount: number;
+  /** Prices of the newest effective list for this model, when configured. */
+  price: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } | null;
 }
 
 /** Estimated cost for one local day (one currency). */
@@ -220,4 +225,14 @@ export interface CostByDayRow {
   day: string;
   currency: string;
   totalMicro: number;
+}
+
+/** One `request/context` sample (the request's window declaration). */
+export interface ContextSampleInput {
+  sessionId: string;
+  seq: number;
+  timestamp: number;
+  provider: string | null;
+  model: string | null;
+  contextWindow: number | null;
 }

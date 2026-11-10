@@ -69,16 +69,44 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return undefined;
 }
 
+/**
+ * Extract a session title from a `session/title` event
+ * (`{ title, messageSeqs, source }` in v4 logs), or null.
+ */
+export function sessionTitleOf(event: SessionEventLike): string | null {
+  if (event.type !== 'session/title') return null;
+  const data = asRecord(event.data);
+  if (data === undefined) return null;
+  return typeof data.title === 'string' && data.title.trim().length > 0
+    ? data.title.trim()
+    : null;
+}
+
 export class SessionNormalizer {
   private readonly sessionId: string;
   private readonly header: SessionHeaderLike;
+  private readonly orphanRetry: 'record' | 'ignore';
   private readonly stepStarts = new Map<string, number>();
   /** requestId of the most recent attempt per step, for llm/retry amendment. */
   private readonly lastAttempt = new Map<string, UsageRecord>();
 
-  constructor(sessionId: string, header: SessionHeaderLike = {}) {
+  /**
+   * `orphanRetry` governs `llm/retry` events with no cached attempt:
+   * - `'record'` (history replay): bill the retry boundary itself so a
+   *   genuinely lost attempt stays visible.
+   * - `'ignore'` (live feed): drop it. The live tracker starts empty at plugin
+   *   boot, so an orphan retry here refers to a pre-boot attempt that history
+   *   import owns — recording it would permanently double-count the call once
+   *   the attempt row converges (review finding: startup boundary).
+   */
+  constructor(
+    sessionId: string,
+    header: SessionHeaderLike = {},
+    options: { orphanRetry?: 'record' | 'ignore' } = {},
+  ) {
     this.sessionId = sessionId;
     this.header = header;
+    this.orphanRetry = options.orphanRetry ?? 'record';
   }
 
   /** First own-event boundary: events below it are fork-inherited seed. */
@@ -103,6 +131,37 @@ export class SessionNormalizer {
    * Process one durable event. Returns a UsageRecord when the event settles an
    * LLM request, otherwise null. Never throws on unexpected payload shapes.
    */
+  /**
+   * A `request/context` event → one context sample: the request's window
+   * declaration (`{ provider, model, contextWindow }` in v4 logs). The
+   * context size itself is derived later from the first following usage
+   * record (see `fillContextTokens`), keeping live and replay identical.
+   */
+  processContext(event: SessionEventLike): {
+    sessionId: string; seq: number; timestamp: number;
+    provider: string | null; model: string | null; contextWindow: number | null;
+  } | null {
+    if (event.type !== 'request/context') return null;
+    try {
+      const data = asRecord(event.data);
+      if (data === undefined) return null;
+      const provider = nullableString(data.provider);
+      const model = nullableString(data.model);
+      const contextWindow = typeof data.contextWindow === 'number' && Number.isFinite(data.contextWindow)
+        ? data.contextWindow
+        : null;
+      if (provider === null && model === null && contextWindow === null) return null;
+      return {
+        sessionId: this.sessionId,
+        seq: Number(event.seq),
+        timestamp: Number(event.time),
+        provider, model, contextWindow,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   process(event: SessionEventLike): UsageRecord | null {
     try {
       switch (event.type) {
@@ -309,8 +368,10 @@ export class SessionNormalizer {
       return amended;
     }
 
-    // The attempt event never settled (hard loss): bill the retry boundary
-    // itself so the failure stays visible in the ledger.
+    // The attempt event never settled in THIS tracker. History replay keeps
+    // the retry visible as an attempt row; the live feed drops it because the
+    // attempt belongs to a pre-boot session that history import will own.
+    if (this.orphanRetry === 'ignore') return null;
     const record = this.base(event, 'attempt');
     if (typeof turn === 'number') record.turn = turn;
     if (typeof step === 'number') record.step = step;

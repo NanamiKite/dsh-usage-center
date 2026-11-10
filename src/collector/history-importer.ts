@@ -8,8 +8,8 @@
  * idempotent upsert, so re-importing is always safe.
  */
 
-import type { SessionRow, UpsertOutcome, UpsertStats, UsageRecord } from '../domain/types.js';
-import { SessionNormalizer, type SessionHeaderLike } from './normalizer.js';
+import type { ContextSampleInput, SessionRow, UpsertOutcome, UpsertStats, UsageRecord } from '../domain/types.js';
+import { SessionNormalizer, sessionTitleOf, type SessionHeaderLike } from './normalizer.js';
 
 /** Minimal structural types for the official sessionQuery service. */
 interface SessionRecordLike {
@@ -32,6 +32,10 @@ export interface SessionQueryLike {
 export interface RecordSink {
   writeRecord(record: UsageRecord): UpsertOutcome;
   writeSessionRow(row: SessionRow): void;
+  /** Optional: persist `request/context` samples (context monitor). */
+  writeContextSample?(sample: ContextSampleInput): void;
+  /** Optional: persist a session title from `session/title` events. */
+  writeSessionTitle?(sessionId: string, title: string): void;
 }
 
 export interface HistoryImportResult {
@@ -91,6 +95,10 @@ export async function importHistory(
             else if (outcome === 'updated') stats.updated += 1;
             else stats.unchanged += 1;
           }
+          const sample = normalizer.processContext(event);
+          if (sample !== null) sink.writeContextSample?.(sample);
+          const title = sessionTitleOf(event);
+          if (title !== null) sink.writeSessionTitle?.(sessionId, title);
           if (typeof event.seq === 'number') lastSeq = event.seq;
         }
         sink.writeSessionRow({
@@ -106,6 +114,7 @@ export async function importHistory(
           seedLength:
             typeof effectiveHeader.seedLength === 'number' ? effectiveHeader.seedLength : null,
           lastSeq,
+          title: null,
           updatedAt: Date.now(),
         });
         result.sessions += 1;

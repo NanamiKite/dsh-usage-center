@@ -58,6 +58,10 @@ window.__ModuleLoader__.load({
       'costs.coverage': '覆盖率',
       'stat.scope.all': '全部时间',
       'card.trend': '按天 Token 趋势',
+      'trend.all': '总览',
+      'trend.provider': '提供商',
+      'trend.model': '模型',
+      'trend.other': '其他',
       'card.heat': '活跃热力图（26 周）',
       'card.models': '模型用量',
       'card.rangeTotal': '区间合计',
@@ -111,14 +115,30 @@ window.__ModuleLoader__.load({
       'status.error': '失败',
       'costs.basis': '模型用量',
       'costs.pending': '费用估算尚未提供',
-      'costs.suggest': '参考价',
-      'costs.fetch': '获取',
-      'costs.matched': '匹配',
-      'costs.unmatched': '未匹配',
-      'costs.copy': '复制',
-      'costs.copied': '已复制',
-      'costs.paste': 'cordis.patch.yml → config.prices',
+      'costs.price': '单价 /1M',
+      'costs.suggest': '参考价…',
+      'costs.imported': '参考价已写入配置，插件重载后生效',
+      'suggest.title': '导入参考价',
+      'suggest.source': '来源：OpenRouter 公开价（USD / 1M tokens）',
+      'suggest.disclaimer': '参考价仅供估算，不等于你的实际账单；只写入勾选的行。',
+      'suggest.match': '匹配',
+      'suggest.match.exact': '精确',
+      'suggest.match.suffix': '一致',
+      'suggest.match.fuzzy': '近似',
+      'suggest.match.none': '无匹配',
+      'suggest.fetching': '正在从 OpenRouter 拉取…',
+      'suggest.import': '导入所选',
+      'suggest.importing': '导入中…',
+      'suggest.cancel': '取消',
       'context.pending': '上下文监控尚未提供',
+      'context.window': '窗口',
+      'context.usage': '水位',
+      'context.peak': '峰值',
+      'context.remaining': '剩余',
+      'context.compactions': '压缩',
+      'context.back': '返回',
+      'context.series': '上下文走势',
+      'table.updated': '更新',
     };
 
     const en = {
@@ -150,6 +170,10 @@ window.__ModuleLoader__.load({
       'costs.coverage': 'Coverage',
       'stat.scope.all': 'all time',
       'card.trend': 'Daily token trend',
+      'trend.all': 'All',
+      'trend.provider': 'Provider',
+      'trend.model': 'Model',
+      'trend.other': 'Other',
       'card.heat': 'Activity heatmap (26 weeks)',
       'card.models': 'Model usage',
       'card.rangeTotal': 'Range total',
@@ -203,14 +227,30 @@ window.__ModuleLoader__.load({
       'status.error': 'Error',
       'costs.basis': 'Model usage',
       'costs.pending': 'Cost estimates are not available yet',
-      'costs.suggest': 'Reference prices',
-      'costs.fetch': 'Fetch',
-      'costs.matched': 'Match',
-      'costs.unmatched': 'No match',
-      'costs.copy': 'Copy',
-      'costs.copied': 'Copied',
-      'costs.paste': 'cordis.patch.yml → config.prices',
+      'costs.price': 'Price /1M',
+      'costs.suggest': 'Reference prices…',
+      'costs.imported': 'Reference prices written to config; applies after the plugin reloads',
+      'suggest.title': 'Import reference prices',
+      'suggest.source': 'Source: OpenRouter public prices (USD / 1M tokens)',
+      'suggest.disclaimer': 'Reference prices are estimates only, not your actual bill; only checked rows are written.',
+      'suggest.match': 'Match',
+      'suggest.match.exact': 'exact',
+      'suggest.match.suffix': 'id match',
+      'suggest.match.fuzzy': 'approx.',
+      'suggest.match.none': 'no match',
+      'suggest.fetching': 'Fetching from OpenRouter…',
+      'suggest.import': 'Import selected',
+      'suggest.importing': 'Importing…',
+      'suggest.cancel': 'Cancel',
       'context.pending': 'Context monitor is not available yet',
+      'context.window': 'Window',
+      'context.usage': 'Watermark',
+      'context.peak': 'Peak',
+      'context.remaining': 'Remaining',
+      'context.compactions': 'Compactions',
+      'context.back': 'Back',
+      'context.series': 'Context series',
+      'table.updated': 'Updated',
     };
 
     const DICTS = { zh, en };
@@ -288,6 +328,18 @@ window.__ModuleLoader__.load({
       });
     }
 
+    function apiPost(path, body) {
+      return fetch(API_BASE + path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify(body ?? {}),
+      }).then(async (res) => {
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(payload?.error ?? `HTTP ${res.status}`);
+        return payload;
+      });
+    }
+
     // ------------------------------------------------------------------ data
 
     function useLoad(build, deps) {
@@ -322,72 +374,169 @@ window.__ModuleLoader__.load({
 
     // ------------------------------------------------------------ components
 
-    const css = `
-.duc-root{height:100%;min-height:0;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:14px}
-.duc-header{display:flex;align-items:center;gap:12px;padding:10px 20px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none;flex-wrap:wrap}
-.duc-back{border:none;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:6px 8px;border-radius:var(--dsw-radius-sm,6px);font:inherit}
-.duc-back:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.05));color:var(--dsw-alias-label-primary)}
+    // ------------------------------------------------------------- colors
+    // Adaptive palette: at boot the client probes whether the host theme
+    // tokens are reachable (computed custom property on the document root).
+    // Themed mode paints with var(--token, literal-fallback); literal mode
+    // paints with the same fallback literals directly. Either way the panel
+    // is readable; themed mode additionally follows the host theme.
+    // NEVER use color-mix() here: this engine rejects it on SVG paints.
+    const LITERAL = {
+      brand: '#4e6ef2',
+      success: '#10b981',
+      warn: '#f59e0b',
+      error: '#ef4444',
+      idle: '#94a3b8',
+      labelSecondary: '#8b909d',
+      borderL1: 'rgba(128,134,145,.28)',
+      borderL2: 'rgba(128,134,145,.5)',
+      bgLayer1: 'rgba(127,127,127,.05)',
+      bgLayer2: 'rgba(127,127,127,.1)',
+      hoverBg: 'rgba(127,127,127,.12)',
+      rowHover: 'rgba(127,127,127,.07)',
+    };
+
+    function buildColors(themed) {
+      if (!themed) {
+        return {
+          ...LITERAL,
+          palette: ['#4e6ef2', '#10b981', '#f59e0b', '#8b5cf6', '#06b6d4', '#f43f5e', '#64748b'],
+          seriesAll: [
+            { color: 'rgba(78,110,242,.16)' },
+            { color: 'rgba(78,110,242,.35)' },
+            { color: 'rgba(78,110,242,.65)' },
+            { color: 'rgba(78,110,242,.95)' },
+          ],
+          heatRamp: [
+            { bg: '#c3d0f7' }, { bg: '#8fa6f4' }, { bg: '#4e6ef2' }, { bg: '#2c46c9' },
+          ],
+        };
+      }
+      const t = (token, literal) => `var(${token}, ${literal})`;
+      const brand = t('--dsw-alias-brand-primary', LITERAL.brand);
+      const success = t('--dsw-alias-state-success-primary', LITERAL.success);
+      const warn = t('--dsw-alias-state-warn-primary', LITERAL.warn);
+      const idle = t('--dsw-alias-state-idle-primary', LITERAL.idle);
+      return {
+        brand,
+        success,
+        warn,
+        error: t('--dsw-alias-state-error-primary', LITERAL.error),
+        idle,
+        labelSecondary: t('--dsw-alias-label-secondary', LITERAL.labelSecondary),
+        borderL1: t('--dsw-alias-border-l1', LITERAL.borderL1),
+        borderL2: t('--dsw-alias-border-l2', LITERAL.borderL2),
+        bgLayer1: t('--dsw-alias-bg-layer-1', LITERAL.bgLayer1),
+        bgLayer2: t('--dsw-alias-bg-layer-2', LITERAL.bgLayer2),
+        hoverBg: t('--dsw-alias-bg-layer-2', LITERAL.hoverBg),
+        rowHover: t('--dsw-alias-bg-layer-1', LITERAL.rowHover),
+        palette: [brand, success, warn, '#8b5cf6', '#06b6d4', '#f43f5e', idle],
+        seriesAll: [
+          { color: brand, opacity: 0.16 },
+          { color: brand, opacity: 0.35 },
+          { color: brand, opacity: 0.65 },
+          { color: brand, opacity: 0.95 },
+        ],
+        heatRamp: [
+          { bg: brand, opacity: 0.35 }, { bg: brand, opacity: 0.55 },
+          { bg: brand, opacity: 0.78 }, { bg: brand, opacity: 0.95 },
+        ],
+      };
+    }
+
+    /** Probe host theme tokens from the client document. Never throws. */
+    function themeTokensReachable() {
+      try {
+        const value = getComputedStyle(document.documentElement)
+          .getPropertyValue('--dsw-alias-brand-primary');
+        return typeof value === 'string' && value.trim().length > 0;
+      } catch {
+        return false;
+      }
+    }
+
+    let C = buildColors(false);
+
+    function buildCss(colors) {
+      const ramp = (level) => {
+        const entry = colors.heatRamp[level - 1];
+        return `background:${entry.bg}${entry.opacity !== undefined ? `;opacity:${entry.opacity}` : ''}`;
+      };
+      return `
+.duc-root{height:100%;min-height:0;display:flex;flex-direction:column;background:transparent;color:inherit;font-size:14px}
+.duc-header{display:flex;align-items:center;gap:12px;padding:10px 20px;border-bottom:1px solid ${colors.borderL1};flex:none;flex-wrap:wrap}
+.duc-back{border:none;background:transparent;color:${colors.labelSecondary};cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;font:inherit}
+.duc-back:hover{background:${colors.hoverBg};color:inherit}
 .duc-title{font-size:16px;font-weight:600;margin:0}
 .duc-spacer{flex:1}
-.duc-tabs{display:flex;gap:2px;padding:4px;background:var(--dsw-alias-bg-layer-2);border-radius:8px}
-.duc-tab{border:none;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;padding:5px 12px;border-radius:6px;font:inherit}
-.duc-tab:hover{color:var(--dsw-alias-label-primary)}
-.duc-tab[aria-selected=true]{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:0 1px 2px rgba(0,0,0,.08)}
-.duc-range{display:inline-flex;gap:0;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;overflow:hidden}
-.duc-range button{border:none;background:transparent;color:var(--dsw-alias-label-secondary);padding:5px 10px;cursor:pointer;font:inherit}
-.duc-range button[aria-pressed=true]{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
-.duc-iconbtn{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:6px;padding:5px 10px;cursor:pointer;font:inherit}
-.duc-iconbtn:hover{color:var(--dsw-alias-label-primary)}
+.duc-tabs{display:flex;gap:2px;padding:4px;background:${colors.bgLayer2};border-radius:8px}
+.duc-tab{border:none;background:transparent;color:${colors.labelSecondary};cursor:pointer;padding:5px 12px;border-radius:6px;font:inherit}
+.duc-tab:hover{color:inherit}
+.duc-tab[aria-selected=true]{background:${colors.bgLayer1};color:inherit;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.duc-range{display:inline-flex;gap:0;border:1px solid ${colors.borderL1};border-radius:6px;overflow:hidden}
+.duc-range button{border:none;background:transparent;color:${colors.labelSecondary};padding:5px 10px;cursor:pointer;font:inherit}
+.duc-range button[aria-pressed=true]{background:${colors.bgLayer2};color:inherit}
+.duc-iconbtn{border:1px solid ${colors.borderL1};background:${colors.bgLayer1};color:${colors.labelSecondary};border-radius:6px;padding:5px 10px;cursor:pointer;font:inherit}
+.duc-iconbtn:hover{color:inherit}
 .duc-body{flex:1;min-height:0;overflow:auto;padding:16px 20px 24px}
 .duc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px}
-.duc-card{background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:10px;padding:14px 16px}
-.duc-card-title{font-size:12px;color:var(--dsw-alias-label-secondary);margin-bottom:8px;font-weight:500;letter-spacing:.02em}
+.duc-card{min-width:0;border:1px solid ${colors.borderL1};border-radius:10px;padding:14px 16px}
+.duc-card-title{font-size:12px;color:${colors.labelSecondary};margin-bottom:6px;font-weight:500;letter-spacing:.02em}
 .duc-stat-value{font-size:22px;font-weight:600;line-height:1.2}
-.duc-stat-sub{font-size:12px;color:var(--dsw-alias-label-secondary);margin-top:4px}
-.duc-section{background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:10px;padding:14px 16px;margin-bottom:16px}
+.duc-stat-sub{font-size:12px;color:${colors.labelSecondary};margin-top:4px}
+.duc-section{border:1px solid ${colors.borderL1};border-radius:10px;padding:14px 16px;margin-bottom:16px}
 .duc-section-title{font-size:13px;font-weight:600;margin:0 0 10px}
 .duc-section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 0 10px}
 .duc-section-head .duc-section-title{margin:0}
 .duc-small{font-size:12px}
-.duc-pre{margin:10px 0 0;padding:10px 12px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre;overflow:auto;max-height:260px}
+.duc-pre{margin:10px 0 0;padding:10px 12px;background:${colors.bgLayer2};border:1px solid ${colors.borderL1};border-radius:8px;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre;overflow:auto;max-height:260px}
+.duc-bar{width:64px;height:6px;background:${colors.bgLayer2};border-radius:3px;overflow:hidden;display:inline-block;vertical-align:middle}
+.duc-bar i{display:block;height:100%;background:${colors.brand}}
 .duc-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .duc-tablewrap{overflow:auto}
 .duc-table{border-collapse:collapse;width:100%;font-size:13px}
-.duc-table th{text-align:left;color:var(--dsw-alias-label-secondary);font-weight:500;padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l2);white-space:nowrap;position:sticky;top:0;background:var(--dsw-alias-bg-layer-1)}
-.duc-table td{padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l1);white-space:nowrap;vertical-align:top}
+.duc-table th{text-align:left;color:${colors.labelSecondary};font-weight:500;padding:6px 10px;border-bottom:1px solid ${colors.borderL2};white-space:nowrap}
+.duc-table td{padding:7px 10px;white-space:nowrap;vertical-align:top}
 .duc-table td.num,.duc-table th.num{text-align:right;font-variant-numeric:tabular-nums}
-.duc-table tr:hover td{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.03))}
+.duc-table tr:hover td{background:${colors.rowHover}}
 .duc-table tr.clickable{cursor:pointer}
-.duc-muted{color:var(--dsw-alias-label-secondary)}
-.duc-error{color:var(--dsw-alias-state-error-primary)}
-.duc-badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11.5px;border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary)}
-.duc-badge.err{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
-.duc-badge.ok{border-color:var(--dsw-alias-state-success-primary);color:var(--dsw-alias-state-success-primary)}
+.duc-muted{color:${colors.labelSecondary}}
+.duc-error{color:${colors.error}}
+.duc-badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11.5px;border:1px solid ${colors.borderL1};color:${colors.labelSecondary}}
+.duc-badge.err{border-color:${colors.error};color:${colors.error}}
+.duc-badge.ok{border-color:${colors.success};color:${colors.success}}
 .duc-filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
-.duc-input{background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:6px;color:var(--dsw-alias-label-primary);padding:5px 9px;font:inherit;min-width:130px}
-.duc-input::placeholder{color:var(--dsw-alias-label-secondary)}
-.duc-input:focus{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-1px}
+.duc-input{background:transparent;border:1px solid ${colors.borderL1};border-radius:6px;color:inherit;padding:5px 9px;font:inherit;min-width:130px}
+.duc-input::placeholder{color:${colors.labelSecondary}}
+.duc-input:focus{outline:2px solid ${colors.brand};outline-offset:-1px}
 select.duc-input{min-width:100px}
-.duc-pager{display:flex;align-items:center;gap:10px;justify-content:flex-end;margin-top:10px;color:var(--dsw-alias-label-secondary);font-size:12.5px}
-.duc-pager button{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit}
+.duc-pager{display:flex;align-items:center;gap:10px;justify-content:flex-end;margin-top:10px;color:${colors.labelSecondary};font-size:12.5px}
+.duc-pager button{border:1px solid ${colors.borderL1};background:${colors.bgLayer1};color:inherit;border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit}
 .duc-pager button:disabled{opacity:.45;cursor:default}
-.duc-state{padding:40px 0;text-align:center;color:var(--dsw-alias-label-secondary)}
+.duc-state{padding:40px 0;text-align:center;color:${colors.labelSecondary}}
 .duc-state button{margin-top:10px}
-.duc-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-secondary);margin-bottom:8px}
+.duc-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:${colors.labelSecondary};margin-bottom:8px}
 .duc-legend span{display:inline-flex;align-items:center;gap:5px}
 .duc-swatch{width:10px;height:10px;border-radius:2px;display:inline-block}
 .duc-trend{width:100%;height:auto;display:block}
 .duc-heatwrap{display:flex;gap:8px}
 .duc-heatgrid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);gap:3px;overflow-x:auto;padding-bottom:4px}
-.duc-cell{width:11px;height:11px;border-radius:2.5px;background:var(--dsw-alias-state-idle-primary);opacity:.25}
-.duc-cell[data-level="1"]{background:var(--dsw-alias-brand-primary);opacity:.22}
-.duc-cell[data-level="2"]{background:var(--dsw-alias-brand-primary);opacity:.45}
-.duc-cell[data-level="3"]{background:var(--dsw-alias-brand-primary);opacity:.7}
-.duc-cell[data-level="4"]{background:var(--dsw-alias-brand-primary);opacity:.95}
-.duc-heatlegend{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--dsw-alias-label-secondary);margin-top:8px}
-.duc-glyph{color:var(--dsw-alias-label-secondary)}
-.duc-glyph[data-active=true]{color:var(--dsw-alias-label-primary)}
+.duc-cell{width:11px;height:11px;border-radius:2.5px;background:rgba(148,163,184,.25)}
+.duc-cell[data-level="1"]{${ramp(1)}}
+.duc-cell[data-level="2"]{${ramp(2)}}
+.duc-cell[data-level="3"]{${ramp(3)}}
+.duc-cell[data-level="4"]{${ramp(4)}}
+.duc-heatlegend{display:flex;align-items:center;gap:4px;font-size:12px;color:${colors.labelSecondary};margin-top:8px}
+.duc-glyph{color:${colors.labelSecondary}}
+.duc-glyph[data-active=true]{color:inherit}
+.duc-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:60}
+.duc-modal{background:${colors.bgLayer1};border:1px solid ${colors.borderL1};border-radius:10px;width:min(92vw,680px);max-height:80vh;display:flex;flex-direction:column;padding:16px;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+.duc-modal-title{font-size:14px;font-weight:600;margin:0 0 4px}
+.duc-modal-body{min-height:0;overflow:auto;margin-top:10px}
+.duc-modal-foot{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+.duc-modal-foot .duc-iconbtn[disabled]{opacity:.5;cursor:default}
 `;
+    }
 
     function StatCard({ title, value, sub, tone }) {
       return h('div', { className: 'duc-card' },
@@ -414,11 +563,15 @@ select.duc-input{min-width:100px}
 
     // ---------------------------------------------------------------- charts
 
+    // Token categories for the "all" view (stacked bottom-up). Colors come
+    // from the adaptive set `C` (see buildColors): themed mode paints brand
+    // with per-segment opacity, literal mode uses the fixed rgba ramp. Never
+    // color-mix() — this engine rejects it on SVG paints.
     const SERIES = [
-      { key: 'cacheWriteTokens', label: 'chart.cacheWrite', alpha: '16%' },
-      { key: 'cacheReadTokens', label: 'chart.cacheRead', alpha: '32%' },
-      { key: 'inputTokens', label: 'chart.input', alpha: '60%' },
-      { key: 'outputTokens', label: 'chart.output', alpha: '95%' },
+      { key: 'cacheWriteTokens', label: 'chart.cacheWrite' },
+      { key: 'cacheReadTokens', label: 'chart.cacheRead' },
+      { key: 'inputTokens', label: 'chart.input' },
+      { key: 'outputTokens', label: 'chart.output' },
     ];
 
     function niceCeil(value) {
@@ -431,7 +584,11 @@ select.duc-input{min-width:100px}
       return 10 * base;
     }
 
-    function TrendChart({ points, t, fmt }) {
+    /**
+     * Stacked daily bars. `by === 'all'` stacks the four token categories per
+     * day; provider/model views stack the per-key series (top keys + other).
+     */
+    function TrendChart({ points, series, by, t, fmt }) {
       const W = 720;
       const H = 190;
       const PAD_L = 46;
@@ -439,20 +596,52 @@ select.duc-input{min-width:100px}
       const PAD_T = 6;
       const plotW = W - PAD_L - 8;
       const plotH = H - PAD_B - PAD_T;
-      const maxTotal = Math.max(...points.map((p) => p.totalTokens), 0);
+      const days = by === 'all' ? points : (series[0]?.points ?? []);
+      const dayTotal = (day) => {
+        if (by === 'all') {
+          const point = points.find((p) => p.day === day);
+          return point === undefined ? 0 : point.totalTokens;
+        }
+        let sum = 0;
+        for (const s of series) {
+          const point = s.points.find((p) => p.day === day);
+          if (point !== undefined) sum += point.totalTokens;
+        }
+        return sum;
+      };
+      const maxTotal = Math.max(...days.map((d) => dayTotal(d.day ?? d)), 0);
       const yMax = niceCeil(maxTotal);
-      const barW = Math.max(1, (plotW / points.length) * 0.72);
-      const step = plotW / points.length;
+      const barW = Math.max(1, (plotW / Math.max(days.length, 1)) * 0.72);
+      const step = plotW / Math.max(days.length, 1);
       const y = (value) => PAD_T + plotH - (value / yMax) * plotH;
-      const labelIdx = points.length <= 1 ? [] : [0, Math.floor((points.length - 1) / 2), points.length - 1];
+      const labelIdx = days.length <= 1 ? [] : [0, Math.floor((days.length - 1) / 2), days.length - 1];
+      const legendItems = by === 'all'
+        ? SERIES.map((s, i) => ({
+          key: s.key, label: t(s.label), idx: i,
+          color: C.seriesAll[i].color,
+          opacity: C.seriesAll[i].opacity,
+        }))
+        : series.map((s, i) => ({
+          key: s.key, label: s.key === 'other' ? t('trend.other') : s.key, idx: i,
+          color: C.palette[i % C.palette.length],
+        }));
+      const segmentValue = (day, legend) => {
+        if (by === 'all') {
+          const point = points.find((p) => p.day === day);
+          return Math.max(point?.[legend.key] ?? 0, 0);
+        }
+        const s = series[legend.idx];
+        const point = s?.points.find((p) => p.day === day);
+        return point === undefined ? 0 : point.totalTokens;
+      };
       return h('div', null,
         h('div', { className: 'duc-legend' },
-          SERIES.map((series) => h('span', { key: series.key },
+          legendItems.map((item) => h('span', { key: item.key },
             h('i', {
               className: 'duc-swatch',
-              style: { background: `color-mix(in srgb, var(--dsw-alias-brand-primary) ${series.alpha}, transparent)` },
+              style: { background: item.color, opacity: item.opacity ?? 1 },
             }),
-            t(series.label),
+            item.label,
           )),
         ),
         h('svg', {
@@ -462,41 +651,51 @@ select.duc-input{min-width:100px}
           [0, 0.5, 1].map((ratio) =>
             h('g', { key: ratio },
               h('line', {
-                x1: PAD_L, x2: W - 8, y1: y(yMax * ratio), y2: y(yMax * ratio),
-                stroke: 'var(--dsw-alias-border-l1)', strokeWidth: 1,
+                x1: PAD_L, x2: W - 8, y1: y(yMax * ratio), y2: y(yMax * ratio), strokeWidth: 1,
+                style: { stroke: C.borderL1 },
               }),
               h('text', {
-                x: PAD_L - 6, y: y(yMax * ratio) + 4, 'text-anchor': 'end',
-                fill: 'var(--dsw-alias-label-secondary)', 'font-size': 10,
+                x: PAD_L - 6, y: y(yMax * ratio) + 4, 'text-anchor': 'end', 'font-size': 10,
+                style: { fill: C.labelSecondary },
               }, fmt.compact(yMax * ratio)),
             )),
-          points.map((point, index) => {
+          days.map((dayPoint, index) => {
+            const day = dayPoint.day;
             const x = PAD_L + index * step + (step - barW) / 2;
             let stacked = 0;
-            const title = `${point.day} · ${fmt.int(point.totalTokens)} ${t('chart.tokensUnit')} · ${fmt.int(point.requests)} ${t('chart.requestsUnit')}` +
-              (point.errorCount > 0 ? ` · ${point.errorCount} ✕` : '');
-            return h('g', { key: point.day },
+            const total = dayTotal(day);
+            const title = by === 'all'
+              ? `${day} · ${fmt.int(total)} ${t('chart.tokensUnit')}`
+              : `${day} · ${fmt.int(total)} ${t('chart.tokensUnit')}\n` + legendItems.map((item) => `${item.label}: ${fmt.int(segmentValue(day, item))}`).join('\n');
+            return h('g', { key: day },
               h('title', null, title),
-              SERIES.map((series) => {
-                const value = Math.max(point[series.key] ?? 0, 0);
+              legendItems.map((item) => {
+                const value = segmentValue(day, item);
                 if (value <= 0) return null;
                 const y0 = y(stacked);
                 stacked += value;
                 const y1 = y(stacked);
+                // y decreases as tokens grow: the segment height is y0 - y1
+                // (y1 - y0 is negative for every positive segment).
                 return h('rect', {
-                  key: series.key, x, width: barW,
-                  y: Math.min(y0, y1), height: Math.max(y1 - y0, 0.8),
-                  fill: `color-mix(in srgb, var(--dsw-alias-brand-primary) ${series.alpha}, transparent)`,
+                  key: item.key, x, width: barW,
+                  y: Math.min(y0, y1), height: Math.max(y0 - y1, 0.8),
+                  opacity: item.opacity,
+                  style: { fill: item.color },
                 });
               }),
+              stacked <= 0 && total > 0
+                ? h('rect', { x, width: barW, y: y(total), height: 0.8, style: { fill: C.borderL2 } })
+                : null,
             );
           }),
           labelIdx.map((index) =>
             h('text', {
               key: index,
-              x: PAD_L + index * step + step / 2, y: H - 4, 'text-anchor': index === 0 ? 'start' : index === points.length - 1 ? 'end' : 'middle',
-              fill: 'var(--dsw-alias-label-secondary)', 'font-size': 10,
-            }, fmt.date(Date.parse(points[index].day + 'T00:00:00'))),
+              x: PAD_L + index * step + step / 2, y: H - 4, 'text-anchor': index === 0 ? 'start' : index === days.length - 1 ? 'end' : 'middle',
+              'font-size': 10,
+              style: { fill: C.labelSecondary },
+            }, fmt.date(Date.parse(days[index].day + 'T00:00:00'))),
           ),
         ),
       );
@@ -541,8 +740,8 @@ select.duc-input{min-width:100px}
 
     // ------------------------------------------------------------------ tabs
 
-    function OverviewTab({ t, fmt, range, data }) {
-      const { totals, today, byModel, trendPoints, heatPoints, costs } = data;
+    function OverviewTab({ t, fmt, range, data, trendBy, setTrendBy }) {
+      const { totals, today, byModel, trendPoints, heatPoints, costs, trendSeries } = data;
       const rangeTotals = trendPoints.reduce((acc, p) => ({
         tokens: acc.tokens + p.totalTokens, requests: acc.requests + p.requests,
       }), { tokens: 0, requests: 0 });
@@ -563,9 +762,18 @@ select.duc-input{min-width:100px}
           h(StatCard, { title: t('stat.todayRequests'), value: fmt.int(today.requests), sub: `${t('stat.todayTokens')} ${fmt.compact(today.totalTokens)}` }),
         ),
         h('div', { className: 'duc-section' },
-          h('h3', { className: 'duc-section-title' },
-            `${t('card.trend')} · ${t('card.rangeTotal')} ${fmt.compact(rangeTotals.tokens)} ${t('chart.tokensUnit')} / ${fmt.int(rangeTotals.requests)} ${t('chart.requestsUnit')}`),
-          h(TrendChart, { points: trendPoints, t, fmt }),
+          h('div', { className: 'duc-section-head' },
+            h('h3', { className: 'duc-section-title' },
+              `${t('card.trend')} · ${t('card.rangeTotal')} ${fmt.compact(rangeTotals.tokens)} ${t('chart.tokensUnit')}`),
+            h('div', { className: 'duc-range', role: 'group', 'aria-label': t('card.trend') },
+              ['all', 'provider', 'model'].map((dim) => h('button', {
+                key: dim, type: 'button', 'aria-pressed': trendBy === dim,
+                onClick: () => setTrendBy(dim),
+              }, t(`trend.${dim}`)))),
+          ),
+          h(TrendChart, {
+            points: trendPoints, series: trendSeries ?? [], by: trendBy, t, fmt,
+          }),
         ),
         h('div', { className: 'duc-section' },
           h('h3', { className: 'duc-section-title' }, t('card.heat')),
@@ -736,9 +944,10 @@ select.duc-input{min-width:100px}
                   onClick: () => onOpenSession(s.sessionId),
                 },
                   h('td', null,
-                    h('span', { className: 'duc-muted' }, `${s.sessionId.slice(0, 16)}… `),
+                    h('span', null, sessionName(s)),
+                    ' ',
                     h('span', { className: 'duc-badge' },
-                      s.origin === 'subagent' ? t('origin.subagent') : s.origin === null ? t('origin.main') : s.origin),
+                      s.origin === 'subagent' ? t('origin.subagent') : ''),
                   ),
                   h('td', null, s.cwd === null ? '' : s.cwd.split(/[\\/]/).pop() || s.cwd),
                   h('td', null, fmt.date(s.createdAt)),
@@ -765,6 +974,121 @@ select.duc-input{min-width:100px}
       );
     }
 
+    /** Manual reference-price import: fetch OpenRouter on demand, write only
+     *  the rows the user confirmed. Nothing here runs without a click. */
+    function SuggestModal({ t, fmt, onClose, onImported }) {
+      const [state, setState] = useState({ loading: true, error: null, suggestions: [] });
+      const [checked, setChecked] = useState({});
+      const [fetched, setFetched] = useState(false);
+      const [importing, setImporting] = useState(false);
+      const [importError, setImportError] = useState(null);
+      useEffect(() => {
+        if (fetched) return;
+        setFetched(true);
+        let alive = true;
+        apiPost('/prices/suggest')
+          .then((payload) => {
+            if (!alive) return;
+            const suggestions = Array.isArray(payload?.suggestions) ? payload.suggestions : [];
+            const map = {};
+            for (const s of suggestions) map[`${s.provider ?? ''}/${s.model}`] = s.checked === true;
+            setChecked(map);
+            setState({ loading: false, error: null, suggestions });
+          })
+          .catch((error) => {
+            if (!alive) return;
+            setState({ loading: false, error: String(error?.message ?? error), suggestions: [] });
+          });
+        return () => { alive = false; };
+      }, []);
+      const keyOf = (s) => `${s.provider ?? ''}/${s.model}`;
+      const selected = state.suggestions.filter(
+        (s) => checked[keyOf(s)] === true && s.matchId !== null
+          && (s.input !== null || s.output !== null || s.cacheRead !== null || s.cacheWrite !== null),
+      );
+      const priceCell = (s) => {
+        const perM = (value) => (value === null || value === undefined ? null : `$${value}`);
+        const parts = [perM(s.input), perM(s.output), perM(s.cacheRead), perM(s.cacheWrite)]
+          .filter((part) => part !== null);
+        return parts.length > 0 ? parts.join(' · ') : '–';
+      };
+      const matchTag = (s) => s.matchQuality === null
+        ? t('suggest.match.none')
+        : t(`suggest.match.${s.matchQuality}`);
+      const doImport = () => {
+        setImporting(true);
+        setImportError(null);
+        apiPost('/prices/import', {
+          models: selected.map((s) => ({
+            provider: s.provider ?? undefined,
+            model: s.model,
+            input: s.input ?? undefined,
+            output: s.output ?? undefined,
+            cacheRead: s.cacheRead ?? undefined,
+            cacheWrite: s.cacheWrite ?? undefined,
+          })),
+        })
+          .then(() => { setImporting(false); onImported(); })
+          .catch((error) => {
+            setImporting(false);
+            setImportError(String(error?.message ?? error));
+          });
+      };
+      return h('div', { className: 'duc-mask' },
+        h('div', { className: 'duc-modal', role: 'dialog', 'aria-label': t('suggest.title') },
+          h('h3', { className: 'duc-modal-title' }, t('suggest.title')),
+          h('div', { className: 'duc-small duc-muted' }, t('suggest.source')),
+          h('div', { className: 'duc-small duc-muted' }, t('suggest.disclaimer')),
+          h('div', { className: 'duc-modal-body' },
+            state.loading
+              ? h('div', { className: 'duc-state' }, t('suggest.fetching'))
+              : state.error !== null
+                ? h('div', { className: 'duc-state' },
+                    `${t('state.error')} — ${state.error}`,
+                    h('br'),
+                    h('button', { type: 'button', className: 'duc-iconbtn', onClick: onClose }, t('suggest.cancel')),
+                  )
+                : h('div', { className: 'duc-tablewrap' },
+                    h('table', { className: 'duc-table' },
+                      h('thead', null, h('tr', null,
+                        h('th', null),
+                        h('th', null, t('table.model')),
+                        h('th', null, t('suggest.match')),
+                        h('th', { className: 'num' }, t('costs.price')),
+                      )),
+                      h('tbody', null, state.suggestions.map((s) => h('tr', { key: keyOf(s) },
+                        h('td', null,
+                          h('input', {
+                            type: 'checkbox',
+                            'aria-label': s.model,
+                            checked: checked[keyOf(s)] === true,
+                            disabled: s.matchId === null,
+                            onClick: () => setChecked((prev) => ({ ...prev, [keyOf(s)]: !(prev[keyOf(s)] === true) })),
+                          })),
+                        h('td', null, `${s.provider ?? '?'} / ${s.model}`),
+                        h('td', { className: 'duc-small', title: s.matchId ?? undefined },
+                          s.matchId === null ? t('suggest.match.none') : `${s.matchId} (${matchTag(s)})`),
+                        h('td', { className: 'num duc-small' }, priceCell(s)),
+                      ))),
+                    ),
+                  ),
+            importError !== null
+              ? h('div', { className: 'duc-error duc-small', style: { marginTop: 8 } }, `${t('state.error')} — ${importError}`)
+              : null,
+          ),
+          h('div', { className: 'duc-modal-foot' },
+            h('button', {
+              type: 'button', className: 'duc-iconbtn', onClick: doImport,
+              disabled: importing || selected.length === 0,
+            }, importing ? t('suggest.importing') : `${t('suggest.import')} (${selected.length})`),
+            h('button', {
+              type: 'button', className: 'duc-iconbtn', onClick: onClose, disabled: importing,
+            }, t('suggest.cancel')),
+          ),
+        ),
+      );
+    }
+
     function CostsTab({ t, fmt, range }) {
       const from = Date.now() - range * 86_400_000;
       const { loading, data, error, refresh } = useLoad(
@@ -774,169 +1098,266 @@ select.duc-input{min-width:100px}
         ],
         [range],
       );
+      const [suggestOpen, setSuggestOpen] = useState(false);
+      const [notice, setNotice] = useState(null);
       const costs = data?.costs;
       const basisRows = data?.basis?.rows ?? [];
-      if (costs !== undefined && costs.configured) {
-        const { byCurrency, byModel, coverage } = costs;
-        return h(StateView, { loading, error, empty: !loading && byModel.length === 0, onRetry: refresh, t },
-          h('div', { className: 'duc-grid' },
-            byCurrency.map((c) => h(StatCard, {
-              key: c.currency,
-              title: `≈ ${c.currency}`,
-              value: fmt.money(c.totalMicro, c.currency),
-              sub: `${t('costs.estimate')} · ${fmt.int(c.requests)}`,
-            })),
-            h(StatCard, {
-              title: t('costs.coverage'),
-              value: coverage.totalRequests > 0
-                ? `${Math.round((coverage.pricedRequests / coverage.totalRequests) * 100)}%`
-                : '–',
-              sub: `${fmt.int(coverage.pricedRequests)} / ${fmt.int(coverage.totalRequests)}`,
-            }),
-          ),
-          h('div', { className: 'duc-section' },
-            h('div', { className: 'duc-section-head' },
-              h('h3', { className: 'duc-section-title' }, `≈ ${t('costs.estimate')}`),
-              h('span', { className: 'duc-small duc-muted' }, byCurrency.map((c) => c.currency).join(' · ')),
-            ),
-            h('div', { className: 'duc-tablewrap' },
-              h('table', { className: 'duc-table' },
-                h('thead', null, h('tr', null,
-                  h('th', null, t('table.model')),
-                  h('th', { className: 'num' }, t('table.requests')),
-                  h('th', { className: 'num' }, t('table.total')),
-                  h('th', { className: 'num' }, `≈ ${t('table.cost')}`),
-                )),
-                h('tbody', null, byModel.map((row) => h('tr', {
-                  key: `${row.key}|${row.currency}`,
-                  title: row.missingCount > 0 ? `⚠ ${row.missingCount}` : undefined,
-                },
-                  h('td', null, row.key),
-                  h('td', { className: 'num' }, fmt.int(row.requests)),
-                  h('td', { className: 'num' }, fmt.compact(row.totalTokens)),
-                  h('td', { className: 'num' },
-                    fmt.money(row.totalMicro, row.currency),
-                    row.missingCount > 0 ? ' ⚠' : ''),
-                ))),
-              ),
-            ),
-          ),
-        );
-      }
-      // No price lists configured: pricing basis + reference-price suggestions.
-      return h(StateView, { loading, error, empty: !loading && basisRows.length === 0, onRetry: refresh, t },
+      const configured = costs !== undefined && costs.configured;
+      // One table in both states: usage facts, then the effective price and
+      // the estimated cost it implies (both "–" until prices are configured).
+      const rows = configured
+        ? costs.byModel
+        : basisRows.map((row) => ({ ...row, currency: null, totalMicro: null, price: null }));
+      const priceCell = (price) => {
+        if (price === null || price === undefined) return '–';
+        const perM = (value) => (value === undefined ? null : fmt.money(value * 1e6, 'USD'));
+        const parts = [
+          perM(price.input),
+          perM(price.output),
+          perM(price.cacheRead),
+        ].filter((part) => part !== null);
+        return parts.length > 0 ? parts.join(' · ') : '–';
+      };
+      return h(StateView, { loading, error, empty: !loading && rows.length === 0, onRetry: refresh, t },
+        configured
+          ? h('div', { className: 'duc-grid' },
+              costs.byCurrency.map((c) => h(StatCard, {
+                key: c.currency,
+                title: `≈ ${c.currency}`,
+                value: fmt.money(c.totalMicro, c.currency),
+                sub: `${t('costs.estimate')} · ${fmt.int(c.requests)}`,
+              })),
+              h(StatCard, {
+                title: t('costs.coverage'),
+                value: costs.coverage.totalRequests > 0
+                  ? `${Math.round((costs.coverage.pricedRequests / costs.coverage.totalRequests) * 100)}%`
+                  : '–',
+                sub: `${fmt.int(costs.coverage.pricedRequests)} / ${fmt.int(costs.coverage.totalRequests)}`,
+              }),
+            )
+          : null,
+        notice !== null
+          ? h('div', { className: 'duc-small duc-muted', style: { marginBottom: 8 } }, notice)
+          : null,
         h('div', { className: 'duc-section' },
           h('div', { className: 'duc-section-head' },
             h('h3', { className: 'duc-section-title' }, t('costs.basis')),
-            h('span', { className: 'duc-small duc-muted' }, t('costs.pending')),
+            h('span', { style: { display: 'inline-flex', gap: '8px', alignItems: 'baseline' } },
+              h('span', { className: 'duc-small duc-muted' },
+                configured ? `≈ ${t('costs.estimate')} · ${costs.byCurrency.map((c) => c.currency).join(' · ')}` : t('costs.pending')),
+              h('button', {
+                type: 'button', className: 'duc-iconbtn duc-small', onClick: () => setSuggestOpen(true),
+              }, t('costs.suggest')),
+            ),
           ),
           h('div', { className: 'duc-tablewrap' },
             h('table', { className: 'duc-table' },
               h('thead', null, h('tr', null,
                 h('th', null, t('table.model')),
                 h('th', { className: 'num' }, t('table.requests')),
-                h('th', { className: 'num' }, t('table.input')),
-                h('th', { className: 'num' }, t('table.output')),
-                h('th', { className: 'num' }, t('table.cacheRead')),
-                h('th', { className: 'num' }, t('table.cacheWrite')),
                 h('th', { className: 'num' }, t('table.total')),
+                h('th', { className: 'num' }, `${t('costs.price')}`),
+                h('th', { className: 'num' }, `≈ ${t('table.cost')}`),
               )),
-              h('tbody', null, basisRows.map((row) => h('tr', { key: row.key },
+              h('tbody', null, rows.map((row) => h('tr', {
+                key: `${row.key}|${row.currency ?? ''}`,
+                title: `${t('costs.price')}: ${t('table.input')}·${t('table.output')}·${t('table.cacheRead')}${row.missingCount > 0 ? `\n⚠ ${row.missingCount}` : ''}`,
+              },
                 h('td', null, row.key),
                 h('td', { className: 'num' }, fmt.int(row.requests)),
-                h('td', { className: 'num' }, fmt.int(row.inputTokens)),
-                h('td', { className: 'num' }, fmt.int(row.outputTokens)),
-                h('td', { className: 'num' }, fmt.int(row.cacheReadTokens)),
-                h('td', { className: 'num' }, fmt.int(row.cacheWriteTokens)),
                 h('td', { className: 'num' }, fmt.compact(row.totalTokens)),
+                h('td', { className: 'num', title: `${t('table.input')}·${t('table.output')}·${t('table.cacheRead')}` },
+                  priceCell(row.price)),
+                h('td', { className: 'num' },
+                  row.totalMicro === null || row.totalMicro === undefined
+                    ? '–'
+                    : `${fmt.money(row.totalMicro, row.currency)}${row.missingCount > 0 ? ' ⚠' : ''}`),
               ))),
             ),
           ),
         ),
-        h(PriceSuggest, { t, fmt }),
+        suggestOpen
+          ? h(SuggestModal, {
+              t, fmt,
+              onClose: () => setSuggestOpen(false),
+              onImported: () => {
+                setSuggestOpen(false);
+                setNotice(t('costs.imported'));
+                window.setTimeout(refresh, 4000);
+              },
+            })
+          : null,
       );
     }
 
-    /** Fetch reference prices from the public listing; suggestions only. */
-    function PriceSuggest({ t, fmt }) {
-      const [state, setState] = useState({ loading: false, data: null, error: null });
-      const [copied, setCopied] = useState(false);
-      const load = () => {
-        setState((prev) => ({ ...prev, loading: true, error: null }));
-        api('/prices/suggest')
-          .then((data) => { setCopied(false); setState({ loading: false, data, error: null }); })
-          .catch((error) => setState({ loading: false, data: null, error: String(error?.message ?? error) }));
-      };
-      const data = state.data;
-      return h('div', { className: 'duc-section' },
-        h('div', { className: 'duc-section-head' },
-          h('h3', { className: 'duc-section-title' }, t('costs.suggest')),
-          h('span', { className: 'duc-small duc-muted' },
-            'OpenRouter · USD',
-            h('button', {
-              type: 'button', className: 'duc-iconbtn', style: { marginLeft: 10 },
-              onClick: load, disabled: state.loading,
-            }, state.loading ? t('state.loading') : t('costs.fetch')),
+
+    /** Single-series context chart: token line against the window's dashed line. */
+    function ContextChart({ samples, windowTokens, t, fmt }) {
+      const W = 720;
+      const H = 190;
+      const PAD_L = 52;
+      const PAD_B = 18;
+      const PAD_T = 14;
+      const plotW = W - PAD_L - 8;
+      const plotH = H - PAD_B - PAD_T;
+      const peak = Math.max(...samples.map((s) => s.contextTokens), 1);
+      const hasWindow = windowTokens !== null && windowTokens > 0;
+      // Scale to the data; include the window in scale only when it is near the peak,
+      // otherwise an idle session (peak 1% of window) squashes the line to the floor
+      // and pushes the window line+label outside the viewBox.
+      const windowScaled = hasWindow && windowTokens <= peak * 2 ? windowTokens : null;
+      const maxTokens = Math.max(peak * 1.1, windowScaled ?? 0, 1);
+      const step = samples.length > 1 ? plotW / (samples.length - 1) : 0;
+      const x = (i) => PAD_L + i * step;
+      const y = (v) => PAD_T + plotH - (v / maxTokens) * plotH;
+      const points = samples.map((s, i) => `${x(i)},${y(s.contextTokens)}`).join(' ');
+      const first = samples[0];
+      const last = samples[samples.length - 1];
+      // The dashed window line: at its true height when scaled, pinned to the top
+      // edge (meaning "above the plotted range") when the window far exceeds the peak.
+      const windowLineY = windowScaled !== null ? y(windowScaled) : PAD_T;
+      const windowLabelY = Math.min(windowLineY + 13, PAD_T + plotH - 2);
+      return h('svg', {
+        className: 'duc-trend', viewBox: `0 0 ${W} ${H}`,
+        role: 'img', 'aria-label': t('context.series'),
+      },
+        [0, 0.5, 1].map((ratio) => h('g', { key: ratio },
+          h('line', { x1: PAD_L, x2: W - 8, y1: y(maxTokens * ratio), y2: y(maxTokens * ratio), strokeWidth: 1, style: { stroke: C.borderL1 } }),
+          h('text', { x: PAD_L - 6, y: y(maxTokens * ratio) + 4, 'text-anchor': 'end', 'font-size': 10, style: { fill: C.labelSecondary } }, fmt.compact(maxTokens * ratio)),
+        )),
+        hasWindow
+          ? h('g', null,
+              h('line', { x1: PAD_L, x2: W - 8, y1: windowLineY, y2: windowLineY, strokeWidth: 1, 'stroke-dasharray': '6 4', style: { stroke: C.warn } }),
+              h('text', { x: W - 10, y: windowLabelY, 'text-anchor': 'end', 'font-size': 10, style: { fill: C.warn } },
+                `${t('context.window')} ${fmt.compact(windowTokens)}${windowScaled !== null ? '' : ' ↑'}`),
+            )
+          : null,
+        h('polyline', { points, fill: 'none', strokeWidth: 1.6, style: { stroke: C.brand } }),
+        h('circle', { cx: x(samples.length - 1), cy: y(last.contextTokens), r: 3, style: { fill: C.brand } },
+          h('title', null, `${fmt.int(last.contextTokens)} tokens @ seq ${last.seq}`)),
+        h('text', { x: PAD_L, y: H - 4, 'font-size': 10, style: { fill: C.labelSecondary } }, `seq ${first.seq}`),
+        h('text', { x: W - 8, y: H - 4, 'text-anchor': 'end', 'font-size': 10, style: { fill: C.labelSecondary } }, `seq ${last.seq}`),
+      );
+    }
+
+    function sessionName(s) {
+      if (s.title !== null && s.title !== undefined) return s.title;
+      if (s.cwd !== null && s.cwd !== undefined) {
+        const base = s.cwd.split(/[\\/]/).pop();
+        if (base !== undefined && base.length > 0) return base;
+      }
+      return `${s.sessionId.slice(0, 16)}…`;
+    }
+
+    function ContextTab({ t, fmt }) {
+      const [selected, setSelected] = useState(null);
+      const overview = useLoad(
+        () => [['ctx', selected === null ? api('/context') : Promise.resolve({})]],
+        [selected === null],
+      );
+      const detail = useLoad(
+        () => [['d', selected !== null ? api('/context', { sessionId: selected }) : Promise.resolve({ samples: [] })]],
+        [selected],
+      );
+      if (selected !== null) {
+        const samples = detail.data?.d?.samples ?? [];
+        const windowTokens = samples.length > 0
+          ? samples.reduce((max, s) => Math.max(max, s.contextWindow ?? 0), 0)
+          : null;
+        return h(StateView, {
+          loading: detail.loading, error: detail.error,
+          empty: !detail.loading && samples.length === 0, onRetry: detail.refresh, t,
+        },
+          h('div', { className: 'duc-section' },
+            h('div', { className: 'duc-section-head' },
+              h('h3', { className: 'duc-section-title' }, t('context.series')),
+              h('button', {
+                type: 'button', className: 'duc-iconbtn',
+                onClick: () => setSelected(null),
+              }, `← ${t('context.back')}`),
+            ),
+            h(ContextChart, { samples, windowTokens, t, fmt }),
+          ),
+        );
+      }
+      const sessions = overview.data?.ctx?.sessions ?? [];
+      const latest = sessions[0];
+      const latestPct = latest !== undefined && latest.contextTokens !== null && latest.contextWindow
+        ? latest.contextTokens / latest.contextWindow
+        : null;
+      return h(StateView, {
+        loading: overview.loading, error: overview.error,
+        empty: !overview.loading && sessions.length === 0, onRetry: overview.refresh, t,
+      },
+        latest !== undefined
+          ? h('div', { className: 'duc-grid' },
+              h(StatCard, {
+                title: t('context.usage'),
+                value: latestPct === null ? '–' : `${(latestPct * 100).toFixed(0)}%`,
+                sub: sessionName(latest),
+              }),
+              h(StatCard, {
+                title: t('context.remaining'),
+                value: latestPct === null || latest.contextWindow === null
+                  ? '–'
+                  : fmt.compact(Math.max(latest.contextWindow - (latest.contextTokens ?? 0), 0)),
+                sub: `${t('context.window')} ${latest.contextWindow === null ? '–' : fmt.compact(latest.contextWindow)}`,
+              }),
+              h(StatCard, {
+                title: t('context.peak'),
+                value: latest.peakTokens === null ? '–' : fmt.compact(latest.peakTokens),
+                sub: `${fmt.int(latest.requests)} ${t('chart.requestsUnit')}`,
+              }),
+              h(StatCard, {
+                title: t('context.compactions'),
+                value: fmt.int(latest.compactions),
+              }),
+            )
+          : null,
+        h('div', { className: 'duc-section' },
+          h('div', { className: 'duc-tablewrap' },
+            h('table', { className: 'duc-table' },
+              h('thead', null, h('tr', null,
+                h('th', null, t('table.session')),
+                h('th', null, t('table.model')),
+                h('th', null, t('context.usage')),
+                h('th', { className: 'num' }, t('context.peak')),
+                h('th', { className: 'num' }, t('context.window')),
+                h('th', { className: 'num' }, t('context.compactions')),
+                h('th', null, t('table.updated')),
+                h('th', { 'aria-hidden': 'true' }),
+              )),
+              h('tbody', null, sessions.map((s) => {
+                const pct = s.contextTokens !== null && s.contextWindow
+                  ? Math.min(100, Math.round((s.contextTokens / s.contextWindow) * 100))
+                  : null;
+                return h('tr', {
+                  key: s.sessionId, className: 'clickable',
+                  title: s.sessionId,
+                  onClick: () => setSelected(s.sessionId),
+                },
+                  h('td', null,
+                    h('span', null, sessionName(s)),
+                    ' ',
+                    h('span', { className: 'duc-badge' },
+                      s.origin === 'subagent' ? t('origin.subagent') : s.origin === null ? '' : s.origin),
+                  ),
+                  h('td', null, `${s.provider ?? '?'} / ${s.model ?? '?'}`),
+                  h('td', null, pct === null ? '–' : h('span', null,
+                    h('span', { className: 'duc-bar' }, h('i', { style: { width: `${pct}%` } })),
+                    ' ', `${pct}%`,
+                  )),
+                  h('td', { className: 'num' }, s.peakTokens === null ? '–' : fmt.compact(s.peakTokens)),
+                  h('td', { className: 'num' }, s.contextWindow === null ? '–' : fmt.compact(s.contextWindow)),
+                  h('td', { className: 'num' }, s.compactions > 0 ? fmt.int(s.compactions) : '–'),
+                  h('td', null, fmt.dateTime(s.timestamp)),
+                  h('td', { className: 'duc-muted', 'aria-hidden': 'true' }, '›'),
+                );
+              })),
+            ),
           ),
         ),
-        state.error !== null
-          ? h('div', { className: 'duc-state' },
-              h('div', { className: 'duc-error' }, `${t('state.error')} — ${state.error}`),
-              h('br'),
-              h('button', { type: 'button', className: 'duc-iconbtn', onClick: load }, t('state.retry')),
-            )
-          : null,
-        data !== null
-          ? h('div', { className: 'duc-tablewrap' },
-              h('table', { className: 'duc-table' },
-                h('thead', null, h('tr', null,
-                  h('th', null, t('table.model')),
-                  h('th', null, t('costs.matched')),
-                  h('th', { className: 'num' }, t('table.input')),
-                  h('th', { className: 'num' }, t('table.output')),
-                  h('th', { className: 'num' }, t('table.cacheRead')),
-                )),
-                h('tbody', null, data.matches.map((m) => h('tr', { key: `${m.provider}/${m.model}` },
-                  h('td', null, `${m.provider ?? '?'}/${m.model}`),
-                  h('td', null,
-                    h('span', { className: 'duc-badge' }, m.key),
-                    ' ',
-                    h('span', { className: 'duc-small duc-muted' }, m.confidence),
-                  ),
-                  h('td', { className: 'num' }, m.entry.input === undefined ? '–' : fmt.money(m.entry.input * 1e6, 'USD')),
-                  h('td', { className: 'num' }, m.entry.output === undefined ? '–' : fmt.money(m.entry.output * 1e6, 'USD')),
-                  h('td', { className: 'num' }, m.entry.cacheRead === undefined ? '–' : fmt.money(m.entry.cacheRead * 1e6, 'USD')),
-                ))),
-              ),
-              data.unmatched.length > 0
-                ? h('div', { className: 'duc-chips' },
-                    data.unmatched.map((u) => h('span', {
-                      key: `${u.provider}/${u.model}`,
-                      className: 'duc-badge', title: t('costs.unmatched'),
-                    }, `${u.provider ?? '?'}/${u.model ?? '?'} · ${t('costs.unmatched')}`)),
-                  )
-                : null,
-              h('div', { className: 'duc-section-head', style: { marginTop: 10, marginBottom: 0 } },
-                h('span', { className: 'duc-small duc-muted' }, t('costs.paste')),
-                h('button', {
-                  type: 'button', className: 'duc-iconbtn', onClick: () => {
-                    if (data.yaml !== undefined && navigator.clipboard !== undefined) {
-                      navigator.clipboard.writeText(data.yaml).then(
-                        () => setCopied(true),
-                        () => {},
-                      );
-                    }
-                  },
-                }, copied ? t('costs.copied') : t('costs.copy')),
-              ),
-              h('pre', { className: 'duc-pre' }, data.yaml),
-            )
-          : null,
       );
-    }
-
-    function ContextTab({ t }) {
-      return h('div', { className: 'duc-state' }, t('context.pending'));
     }
 
     // -------------------------------------------------------------- dashboard
@@ -946,6 +1367,7 @@ select.duc-input{min-width:100px}
     function DashboardView({ env }) {
       const [tab, setTab] = useState('overview');
       const [range, setRange] = useState(30);
+      const [trendBy, setTrendBy] = useState('all');
       const [filters, setFilters] = useState({ page: 0 });
       const active = React.useSyncExternalStore(
         (callback) => env.locale.subscribe(callback),
@@ -962,19 +1384,30 @@ select.duc-input{min-width:100px}
         money: makeMoneyFormatter(typeof active === 'string' && active.length > 0 ? active : 'en'),
       }), [active]);
       const overview = useLoad(
-        () => [
-          ['summary', api('/summary')],
-          ['models', api('/breakdown', { by: 'model' })],
-          ['trend', api('/trend', { days: range })],
-          ['heat', api('/trend', { days: 182 })],
-        ],
-        [range],
+        () => {
+          const trendParams = trendBy === 'all' ? { days: range } : { days: range, by: trendBy };
+          return [
+            ['summary', api('/summary')],
+            ['models', api('/breakdown', { by: 'model' })],
+            ['trend', api('/trend', trendParams)],
+            ['heat', api('/trend', { days: 182 })],
+          ];
+        },
+        [range, trendBy],
       );
+      // Interpret the trend response by ITS OWN `by` marker, never by the
+      // current trendBy state: between a dimension click and the reload there
+      // is one render where the old response (other shape) is still in state.
+      const trendResp = overview.data?.trend ?? {};
+      const trendIsAll = trendResp.by === undefined || trendResp.by === 'all';
       const overviewData = overview.data !== null && overview.data !== undefined ? {
         totals: overview.data.summary.totals,
         today: overview.data.summary.today,
         byModel: overview.data.models.rows,
-        trendPoints: overview.data.trend.points,
+        trendPoints: trendIsAll
+          ? (trendResp.points ?? [])
+          : (trendResp.series?.[0]?.points ?? []).map((p) => ({ ...p, requests: 0 })),
+        trendSeries: trendIsAll ? null : trendResp.series,
         heatPoints: overview.data.heat.points,
         costs: overview.data.summary.costs,
       } : null;
@@ -1017,7 +1450,7 @@ select.duc-input{min-width:100px}
               empty: overviewData !== null && overviewData.totals.requests === 0,
               onRetry: overview.refresh, t,
             }, overviewData === null ? null : h(OverviewTab, {
-              t, fmt, range, data: overviewData,
+              t, fmt, range, data: overviewData, trendBy, setTrendBy,
             }))
             : null,
           tab === 'requests' ? h(RequestsTab, { t, fmt, filters, setFilters }) : null,
@@ -1028,7 +1461,7 @@ select.duc-input{min-width:100px}
             },
           }) : null,
           tab === 'costs' ? h(CostsTab, { t, fmt, range }) : null,
-          tab === 'context' ? h(ContextTab, { t }) : null,
+          tab === 'context' ? h(ContextTab, { t, fmt }) : null,
         ),
       );
     }
@@ -1058,9 +1491,16 @@ select.duc-input{min-width:100px}
       const offLocale = ctx.locale.register(NS, DICTS);
       ctx.effect(() => offLocale, 'usage-center: locale dictionaries');
 
+      // Adaptive palette: probe the host theme once at boot. Themed mode
+      // paints var(--token, literal); literal mode paints the literals. The
+      // mode is stamped on the style tag for remote diagnosis.
+      const themed = themeTokensReachable();
+      C = buildColors(themed);
+      console.log(`dsh-usage-center: theme tokens ${themed ? 'reachable — following host theme' : 'unreachable — literal palette'}`);
       const style = document.createElement('style');
       style.dataset.plugin = 'dsh-usage-center';
-      style.textContent = css;
+      style.dataset.theme = themed ? 'on' : 'off';
+      style.textContent = buildCss(C);
       document.head.appendChild(style);
       ctx.effect(() => () => { style.remove(); }, 'usage-center: styles');
 

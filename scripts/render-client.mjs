@@ -20,6 +20,7 @@ globalThis.window = {
   __ModuleLoader__: { load(def) { loads.push(def); } },
   setInterval: () => 0,
   clearInterval: () => {},
+  setTimeout: () => 0,
 };
 globalThis.document = {
   createElement() {
@@ -75,26 +76,48 @@ function payloadFor(path) {
       byModel: [{
         provider: 'glm', model: 'glm-5.3', key: 'glm/glm-5.3', currency: 'USD',
         requests: 500, totalTokens: 61_000_000, totalMicro: 12_000_000, missingCount: 1,
+        price: { input: 1.1, output: 4.4, cacheRead: 0.11 },
       }],
       byDay: [{ day: '2026-11-10', currency: 'USD', totalMicro: 500_000 }],
       coverage: { totalRequests: 600, pricedRequests: 590 },
     };
   }
-  if (path.startsWith('/prices/suggest')) {
+  if (path.startsWith('/context')) {
+    if (path.includes('sessionId=')) {
+      return {
+        sessionId: 'session-x-1234567890',
+        samples: Array.from({ length: 12 }, (_, i) => ({
+          seq: 10 + i * 7,
+          timestamp: 1794280000000 + i * 60_000,
+          provider: 'glm', model: 'glm-5.3',
+          contextTokens: 20_000 + i * 9_000,
+          contextWindow: 1_000_000,
+          requestId: `s:${i}`,
+        })),
+      };
+    }
     return {
-      source: 'openrouter', sourceUrl: 'https://openrouter.ai/api/v1/models',
-      currency: 'USD', fetchedAt: 1794300000000, entries: 300,
-      matches: [
-        {
-          provider: 'glm', model: 'glm-5.3', requests: 271, key: 'z-ai/glm-5.3', confidence: 'alias',
-          entry: { key: 'z-ai/glm-5.3', provider: 'z-ai', model: 'glm-5.3', input: 1.1, output: 4.4, cacheRead: 0.11 },
-        },
-      ],
-      unmatched: [{ provider: null, model: null, requests: 1 }],
-      yaml: "- name: openrouter-test\n  currency: USD\n  effectiveFrom: '2026-11-10'\n  models:\n    - { model: glm-5.3, provider: glm, input: 1.1, output: 4.4, cacheRead: 0.11 }",
+      sessions: [{
+        sessionId: 'session-x-1234567890', title: 'Verify dashboard rendering', origin: null, parentSessionId: null,
+        provider: 'glm', model: 'glm-5.3',
+        contextTokens: 119_000, peakTokens: 190_000, contextWindow: 1_000_000,
+        timestamp: 1794280000000, compactions: 1, requests: 42,
+      }],
     };
   }
-  if (path.startsWith('/trend')) return { points: trendPoints };
+  if (path.startsWith('/trend')) {
+    if (path.includes('by=provider') || path.includes('by=model')) {
+      const by = path.includes('by=provider') ? 'provider' : 'model';
+      return {
+        by,
+        series: [
+          { key: by === 'provider' ? 'glm' : 'glm/glm-5.3', points: trendPoints.map((p) => ({ day: p.day, totalTokens: Math.round(p.totalTokens * 0.8) })) },
+          { key: by === 'provider' ? 'deepseek-account' : 'deepseek-account/deepseek-flash', points: trendPoints.map((p) => ({ day: p.day, totalTokens: Math.round(p.totalTokens * 0.2) })) },
+        ],
+      };
+    }
+    return { by: 'all', points: trendPoints };
+  }
   if (path.startsWith('/breakdown')) {
     return {
       dim: 'model',
@@ -125,10 +148,31 @@ function payloadFor(path) {
 }
 
 const fetchedUrls = [];
-globalThis.fetch = (url) => {
+let importedBody = null;
+const suggestFixture = {
+  source: 'openrouter',
+  fetchedAt: 1794280000000,
+  suggestions: [
+    { provider: 'glm', model: 'glm-5.3', requests: 500, tokens: 61_000_000, matchId: 'z-ai/glm-5.3', matchName: 'GLM 5.3', matchQuality: 'suffix', input: 0.5, output: 1.5, cacheRead: 0.05, cacheWrite: 0.7, checked: true },
+    { provider: 'deepseek-account', model: 'deepseek-flash', requests: 90, tokens: 11_000_000, matchId: 'deepseek/deepseek-flash', matchName: 'DeepSeek Flash', matchQuality: 'exact', input: 0.27, output: 1.1, cacheRead: 0.007, cacheWrite: null, checked: true },
+    { provider: 'gpt', model: 'gpt-6.1-sol', requests: 10, tokens: 8630, matchId: null, matchName: null, matchQuality: null, input: null, output: null, cacheRead: null, cacheWrite: null, checked: false },
+  ],
+};
+globalThis.fetch = (url, options) => {
   fetchedUrls.push(url);
   const parsed = new URL(url, 'http://x');
   const subPath = parsed.pathname.replace(/^\/dsh-usage-center\/v1/, '') + parsed.search;
+  if (options?.method === 'POST') {
+    if (subPath === '/prices/suggest') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(suggestFixture) });
+    }
+    if (subPath === '/prices/import') {
+      importedBody = JSON.parse(options.body);
+      costsConfigured = true;
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, imported: importedBody.models.length }) });
+    }
+    return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({ error: 'not found' }) });
+  }
   return Promise.resolve({ ok: true, json: () => Promise.resolve(payloadFor(subPath)) });
 };
 
@@ -311,22 +355,105 @@ for (const label of ['请求', '台账', '费用', '上下文', '总览', '请�
 
 assert.match(textOf(tree), /上一页/, 'requests pager rendered');
 
-// Costs (unconfigured): fetch reference prices, table + yaml render.
+// Costs (unconfigured): unified table with "–" price/cost cells.
 await clickTab('费用');
-const fetchButton = findButtonWithText(tree, '获取');
-assert.ok(fetchButton !== undefined, 'suggest fetch button found');
-fetchButton.props.onClick();
-await settle();
-tree = renderDashboard();
-const costsText = textOf(tree);
-assert.match(costsText, /z-ai\/glm-5\.3/, 'suggestion match table rendered');
-assert.match(costsText, /effectiveFrom/, 'suggestion yaml rendered');
+assert.match(textOf(tree), /模型用量/, 'unconfigured costs table rendered');
+assert.match(textOf(tree), /单价/, 'price column present');
 
-// Costs (configured): estimate cards view.
+// Costs (configured): estimate cards + price + cost cells.
 costsConfigured = true;
 await clickTab('总览');
 await clickTab('费用');
 assert.match(textOf(tree), /USD/, 'configured cost view rendered');
+assert.match(textOf(tree), /1\.10/, 'configured price cell rendered');
+
+// Reference-price import: explicit button, per-row confirmation, POST only
+// the checked rows, notice after import.
+costsConfigured = false;
+await clickTab('总览');
+await clickTab('费用');
+const suggestButton = findButtonWithText(tree, '参考价');
+assert.ok(suggestButton !== undefined, 'suggest button rendered');
+suggestButton.props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /导入参考价/, 'suggest modal rendered');
+assert.match(textOf(tree), /OpenRouter/, 'source line rendered');
+assert.match(textOf(tree), /z-ai\/glm-5\.3/, 'suggestion match rendered');
+assert.match(textOf(tree), /无匹配/, 'unmatched row rendered');
+const boxes = collectNodes(tree).filter((n) => n.tag === 'input' && n.props.type === 'checkbox');
+assert.equal(boxes.length, 3, 'one checkbox per suggestion');
+assert.equal(boxes[2].props.disabled, true, 'unmatched row disabled');
+boxes[1].props.onClick(); // uncheck deepseek-flash
+dirty = true;
+await settle();
+tree = renderDashboard();
+const importButton = findButtonWithText(tree, '导入所选');
+assert.ok(importButton !== undefined, 'import button rendered');
+assert.match(textOf(importButton), /\(1\)/, 'one row selected after unchecking');
+importButton.props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.ok(importedBody !== null, 'import request posted');
+assert.equal(importedBody.models.length, 1, 'only the checked row posted');
+assert.equal(importedBody.models[0].model, 'glm-5.3');
+assert.equal(importedBody.models[0].cacheWrite, 0.7);
+assert.match(textOf(tree), /参考价已写入配置/, 'imported notice rendered');
+
+// Context monitor: sessions table (with title), drill into the series view.
+await clickTab('上下文');
+assert.match(textOf(tree), /glm-5\.3/, 'context sessions rendered');
+assert.match(textOf(tree), /Verify dashboard rendering/, 'session title rendered');
+assert.match(textOf(tree), /峰值/, 'peak column rendered');
+const contextRow = collectNodes(tree).find((n) => n.tag === 'tr' && typeof n.props.onClick === 'function');
+assert.ok(contextRow !== undefined, 'context row clickable');
+contextRow.props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /seq 10/, 'context series chart rendered');
+await clickTab('总览');
+
+// Trend dimension switch: provider view renders per-key legend.
+const providerChip = findButtonWithText(tree, '提供商');
+assert.ok(providerChip !== undefined, 'trend dimension chips rendered');
+providerChip.props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /deepseek-account/, 'provider series legend rendered');
+
+// Switch back to "all" and render BEFORE the reload settles: the stale
+// provider-shaped response must not crash the all-view interpretation.
+const allChip = findButtonWithText(tree, '总览');
+assert.ok(allChip !== undefined, 'all chip rendered');
+allChip.props.onClick();
+dirty = true;
+tree = renderDashboard(); // no settle: one stale-response frame
+assert.match(textOf(tree), /用量中心/, 'stale-response frame renders without crash');
+await settle();
+tree = renderDashboard();
+
+// Stacked bars must express magnitude: at least one segment taller than a
+// hairline (the old Math.max(y1 - y0, 0.8) bug drew every bar 0.8px).
+const barRects = collectNodes(tree).filter(
+  (n) => n.tag === 'rect' && typeof n.props.height === 'number' && n.props.height > 5,
+);
+assert.ok(barRects.length > 0, `bar segments express magnitude (tallest: ${Math.max(...barRects.map((r) => r.props.height)).toFixed(1)}px)`);
+
+// Chart paints must not contain color-mix(): this engine rejects it on SVG
+// fill/stroke and paint falls back to black. Plain `var(--token, literal)`
+// is fine (proven live: solid var-based series render colored).
+const SVG_PAINTED = ['rect', 'line', 'circle', 'polyline', 'text'];
+const paints = collectNodes(tree).filter((n) => SVG_PAINTED.includes(n.tag))
+  .flatMap((n) => [n.props.style?.fill, n.props.style?.stroke])
+  .filter((v) => typeof v === 'string' && v.length > 0);
+assert.ok(paints.length > 0, 'chart paints present');
+for (const paint of paints) {
+  assert.ok(!paint.includes('color-mix('), `chart paint must not use color-mix(), got: ${paint}`);
+}
 
 // Ledger row click jumps to requests with a session filter.
 await clickTab('台账');

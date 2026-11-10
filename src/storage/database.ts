@@ -44,7 +44,7 @@ import {
 
 /** 'dshu' -- dsh-usage-center's SQLite application id. */
 export const APPLICATION_ID = 0x6473_6875;
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 5;
 
 const CREATE_V1 = `
 CREATE TABLE IF NOT EXISTS usage_records (
@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   origin            TEXT,
   seed_length       INTEGER,
   last_seq          INTEGER,
+  title             TEXT,
   updated_at        INTEGER NOT NULL
 );
 
@@ -168,6 +169,30 @@ CREATE TABLE IF NOT EXISTS cost_entries (
 CREATE INDEX IF NOT EXISTS idx_cost_list ON cost_entries (price_list_id);
 `;
 
+/**
+ * v4: context monitor. One row per `request/context` event (a request's
+ * window declaration); `context_tokens` is derived later from the first
+ * following usage record (input + cacheRead + cacheWrite ≈ the context the
+ * model was fed), attributed to every still-open sample of that request.
+ */
+const CREATE_V4 = `
+CREATE TABLE IF NOT EXISTS context_samples (
+  session_id     TEXT NOT NULL,
+  seq            INTEGER NOT NULL,
+  timestamp      INTEGER NOT NULL,
+  provider       TEXT,
+  model          TEXT,
+  context_window INTEGER,
+  context_tokens INTEGER,
+  request_id     TEXT,
+  PRIMARY KEY (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_context_session ON context_samples (session_id, timestamp);
+`;
+
+/** v5: session titles (from `session/title` events) shown instead of raw ids. */
+const MIGRATE_V5 = 'ALTER TABLE sessions ADD COLUMN title TEXT;';
+
 const RECORD_COLUMNS = `
   request_id, session_id, seq, turn, step, parent_session_id, origin, is_seed,
   cwd, provider, model, kind, timestamp,
@@ -182,11 +207,17 @@ function now(): number {
   return Date.now();
 }
 
-/** Compare two ledger rows on the fact columns an update may change. */
+/** Compare two ledger rows on the fact columns an update may change.
+ *  Includes lineage/metadata columns: a metadata-only correction (e.g. a late
+ *  isSeed/cwd fix) must still count as a change, or the row can never heal. */
 function factsDiffer(a: Record<string, unknown>, r: UsageRecord): boolean {
   return (
     a.turn !== r.turn ||
     a.step !== r.step ||
+    a.parent_session_id !== r.parentSessionId ||
+    a.origin !== r.origin ||
+    a.is_seed !== (r.isSeed ? 1 : 0) ||
+    a.cwd !== r.cwd ||
     a.provider !== r.provider ||
     a.model !== r.model ||
     a.kind !== r.kind ||
@@ -203,14 +234,23 @@ function factsDiffer(a: Record<string, unknown>, r: UsageRecord): boolean {
     a.error_code !== r.errorCode ||
     a.error_status !== r.errorStatus ||
     a.error_message !== r.errorMessage ||
-    a.raw_usage !== r.rawUsage
+    a.raw_usage !== r.rawUsage ||
+    a.source_event !== r.sourceEvent
   );
 }
 
 export class UsageDatabase {
   readonly db: DatabaseSync;
+  private readonly readOnly: boolean;
 
-  constructor(path: string) {
+  constructor(path: string, options: { readOnly?: boolean } = {}) {
+    this.readOnly = options.readOnly === true;
+    if (this.readOnly) {
+      // Read-only consumers (CLI): open as-is, no mkdir/PRAGMA writes/migrations.
+      this.db = new DatabaseSync(path, { readOnly: true });
+      this.db.exec('PRAGMA busy_timeout = 10000;');
+      return;
+    }
     if (path !== ':memory:') {
       mkdirSync(dirname(path), { recursive: true });
     }
@@ -259,13 +299,24 @@ export class UsageDatabase {
       this.db.exec(CREATE_V3);
       version = 3;
     }
+    if (version < 4) {
+      this.db.exec(CREATE_V4);
+      version = 4;
+    }
+    if (version < 5) {
+      try {
+        this.db.exec(MIGRATE_V5);
+      } catch {
+        // column already present (fresh DBs re-running V1 with the column)
+      }
+      version = 5;
+    }
     this.db.exec(`PRAGMA application_id = ${APPLICATION_ID};`);
     this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
     this.setMeta('schema_version', String(SCHEMA_VERSION));
   }
 
-  setMeta(key: string, value: string): void {
-    this.db
+  setMeta(key: string, value: string): void {    this.db
       .prepare(
         'INSERT INTO meta (key, value) VALUES (?, ?) ' +
           'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
@@ -347,6 +398,7 @@ export class UsageDatabase {
           importedAt: ts,
           updatedAt: ts,
         });
+      this.purgeOrphanRetryRows(record);
       return 'inserted';
     }
     this.pendingStatsWrites = true;
@@ -391,7 +443,32 @@ export class UsageDatabase {
         ts,
         record.requestId,
       );
+    this.purgeOrphanRetryRows(record);
     return 'updated';
+  }
+
+  /**
+   * Startup-boundary healing: a live `llm/retry` whose attempt predates the
+   * plugin boot is recorded as a standalone fallback row (source_event
+   * 'llm/retry'). Once the real attempt row for the same (turn, step) lands —
+   * from live settlement or history import — the fallback is a permanent
+   * double count, so delete it. Fallback rows are never amendment targets
+   * (amendments keep the attempt's request id), so the discriminator is safe.
+   */
+  private purgeOrphanRetryRows(record: UsageRecord): void {
+    if (record.sourceEvent === 'llm/retry') return;
+    if (typeof record.turn !== 'number' || typeof record.step !== 'number') return;
+    const purged = this.db
+      .prepare(
+        `DELETE FROM usage_records
+          WHERE session_id = ? AND turn IS ? AND step IS ?
+            AND source_event = 'llm/retry' AND request_id != ?`,
+      )
+      .run(record.sessionId, record.turn, record.step, record.requestId);
+    if (purged.changes > 0) {
+      this.pendingStatsWrites = true;
+      this.pendingCostWrites = true;
+    }
   }
 
   /** Idempotent session bookkeeping; advances the watermark. */
@@ -422,6 +499,18 @@ export class UsageDatabase {
       );
   }
 
+  /** Record a session title from a `session/title` event (non-null wins). */
+  setSessionTitle(sessionId: string, title: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO sessions (session_id, title, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           title = COALESCE(excluded.title, sessions.title),
+           updated_at = excluded.updated_at`,
+      )
+      .run(sessionId, title, now());
+  }
+
   getSession(sessionId: string): SessionRow | undefined {
     const row = this.db
       .prepare('SELECT * FROM sessions WHERE session_id = ?')
@@ -436,6 +525,7 @@ export class UsageDatabase {
       origin: typeof row.origin === 'string' ? row.origin : null,
       seedLength: typeof row.seed_length === 'number' ? row.seed_length : null,
       lastSeq: typeof row.last_seq === 'number' ? row.last_seq : null,
+      title: typeof row.title === 'string' && row.title.length > 0 ? row.title : null,
       updatedAt: typeof row.updated_at === 'number' ? row.updatedAt as number : now(),
     };
   }
@@ -456,6 +546,7 @@ export class UsageDatabase {
       origin: typeof row.origin === 'string' ? row.origin : null,
       seedLength: typeof row.seed_length === 'number' ? row.seed_length : null,
       lastSeq: typeof row.last_seq === 'number' ? row.last_seq : null,
+      title: typeof row.title === 'string' && row.title.length > 0 ? row.title : null,
       updatedAt: typeof row.updated_at === 'number' ? (row.updated_at as number) : now(),
       recordCount: Number(row.record_count ?? 0),
     }));
@@ -497,7 +588,7 @@ export class UsageDatabase {
     };
   }
 
-  private static WHERE(
+  static WHERE(
     filters: { sessionId?: string; provider?: string; model?: string; kind?: string; from?: number; to?: number; includeSeed?: boolean },
   ): { clause: string; params: SQLInputValue[] } {
     const parts: string[] = [];
@@ -779,6 +870,7 @@ export class UsageDatabase {
    * poll never amplifies into one GROUP BY per request.
    */
   ensureDailyStatsFresh(maxAgeMs = 2000): void {
+    if (this.readOnly) return;
     if (!this.statsDirty()) return;
     if (Date.now() - this.lastRebuildAt < maxAgeMs) return;
     this.rebuildDailyStats();
@@ -850,6 +942,64 @@ export class UsageDatabase {
     return points;
   }
 
+  /**
+   * Per-series daily trend grouped by dimension (`provider` or `model`,
+   * where a model key is `provider/model`): top 6 keys by total tokens plus
+   * an aggregated "其他/other" bucket, each zero-filled across the range.
+   */
+  trendSeries(by: 'provider' | 'model', days: number): Array<{ key: string; points: Array<{ day: string; totalTokens: number }> }> {
+    this.ensureDailyStatsFresh();
+    const span = Math.min(Math.max(Math.trunc(days) || 30, 1), 366);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const start = new Date(today.getTime());
+    start.setDate(start.getDate() - (span - 1));
+    const startDay = UsageDatabase.dayOf(start.getTime());
+    const keyExpr = by === 'provider' ? "COALESCE(provider, '?')" : "COALESCE(provider, '?') || '/' || COALESCE(model, '?')";
+    const rows = this.db
+      .prepare(
+        `SELECT day, ${keyExpr} AS k, SUM(total_tokens) AS total_tokens
+          FROM daily_stats WHERE day >= ? GROUP BY day, k`,
+      )
+      .all(startDay) as Array<Record<string, unknown>>;
+    const totals = new Map<string, number>();
+    const byDayKey = new Map<string, number>();
+    for (const row of rows) {
+      const key = String(row.k);
+      const value = Number(row.total_tokens ?? 0);
+      totals.set(key, (totals.get(key) ?? 0) + value);
+      byDayKey.set(`${row.day}|${key}`, value);
+    }
+    const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1]);
+    const top = ranked.slice(0, 6).map(([key]) => key);
+    const topSet = new Set(top);
+    const keys = [...top];
+    const otherTotal = ranked.slice(6).reduce((acc, [, value]) => acc + value, 0);
+    const hasOther = otherTotal > 0 && ranked.length > 6;
+    if (hasOther) keys.push('other');
+    const cursor = new Date(start.getTime());
+    const days_list: string[] = [];
+    for (let i = 0; i < span; i += 1) {
+      days_list.push(UsageDatabase.dayOf(cursor.getTime()));
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return keys.map((key) => ({
+      key,
+      points: days_list.map((day) => {
+        if (key === 'other') {
+          let sum = 0;
+          for (const [mapKey, value] of byDayKey) {
+            if (mapKey.startsWith(`${day}|`) && !topSet.has(mapKey.slice(day.length + 1))) {
+              sum += value;
+            }
+          }
+          return { day, totalTokens: sum };
+        }
+        return { day, totalTokens: byDayKey.get(`${day}|${key}`) ?? 0 };
+      }),
+    }));
+  }
+
   /** Requests grouped by model / provider / kind over a time range. */
   breakdown(
     dim: BreakdownDim,
@@ -912,16 +1062,20 @@ export class UsageDatabase {
 
   /** Per-session usage summaries for the ledger view. */
   sessionSummaries(
-    query: { limit?: number; offset?: number } = {},
+    query: { limit?: number; offset?: number; unpaged?: boolean } = {},
   ): { items: SessionSummaryRow[]; total: number } {
-    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    // Paged UI surface: keep requests cheap with a hard page ceiling. Exports
+    // bypass the ceiling via `unpaged` so they never silently truncate.
+    const limit = query.unpaged === true
+      ? Math.max(query.limit ?? 50, 1)
+      : Math.min(Math.max(query.limit ?? 50, 1), 200);
     const offset = Math.max(query.offset ?? 0, 0);
     const total = (
       this.db.prepare('SELECT COUNT(*) AS c FROM sessions').get() as { c: number }
     ).c;
     const rows = this.db
       .prepare(
-        `SELECT s.session_id, s.created_at, s.cwd, s.origin, s.parent_session_id,
+        `SELECT s.session_id, s.title, s.created_at, s.cwd, s.origin, s.parent_session_id,
             COUNT(r.request_id) AS requests,
             COALESCE(SUM(r.input_tokens), 0) AS input_tokens,
             COALESCE(SUM(r.output_tokens), 0) AS output_tokens,
@@ -940,6 +1094,7 @@ export class UsageDatabase {
       .all(limit, offset) as Array<Record<string, unknown>>;
     const items = rows.map((row) => ({
       sessionId: String(row.session_id),
+      title: typeof row.title === 'string' && row.title.length > 0 ? row.title : null,
       createdAt: typeof row.created_at === 'number' ? row.created_at : null,
       cwd: typeof row.cwd === 'string' ? row.cwd : null,
       origin: typeof row.origin === 'string' ? row.origin : null,
@@ -1139,13 +1294,22 @@ export class UsageDatabase {
   }
 
   ensureCostsFresh(maxAgeMs = 2000): void {
+    if (this.readOnly) return;
     if (!this.costsDirty()) return;
     if (Date.now() - this.lastCostRebuildAt < maxAgeMs) return;
     this.rebuildCosts();
   }
 
   /** Aggregated estimated costs over a time range (per currency / model / day). */
-  costAggregates(filters: { from?: number; to?: number } = {}): {
+  costAggregates(filters: {
+    sessionId?: string;
+    provider?: string;
+    model?: string;
+    kind?: string;
+    from?: number;
+    to?: number;
+    includeSeed?: boolean;
+  } = {}): {
     byCurrency: CostByCurrency[];
     byModel: CostByModelRow[];
     byDay: CostByDayRow[];
@@ -1200,6 +1364,29 @@ export class UsageDatabase {
       bucket.totalMicro += Number(row.total_micro ?? 0);
     }
     const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+    // Attach the prices of the newest effective list so the table can show
+    // price × usage per model.
+    const priceRows = this.db
+      .prepare(
+        `SELECT p.provider, p.model, p.input_per_m, p.output_per_m, p.cache_read_per_m, p.cache_write_per_m
+          FROM prices p
+          WHERE p.price_list_id = (SELECT id FROM price_lists ORDER BY effective_from DESC, id DESC LIMIT 1)`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    const priceMap = new Map<string, { input?: number; output?: number; cacheRead?: number; cacheWrite?: number }>();
+    for (const row of priceRows) {
+      const entry: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } = {};
+      const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+      const input = num(row.input_per_m);
+      const output = num(row.output_per_m);
+      const cacheRead = num(row.cache_read_per_m);
+      const cacheWrite = num(row.cache_write_per_m);
+      if (input !== undefined) entry.input = input;
+      if (output !== undefined) entry.output = output;
+      if (cacheRead !== undefined) entry.cacheRead = cacheRead;
+      if (cacheWrite !== undefined) entry.cacheWrite = cacheWrite;
+      priceMap.set(`${str(row.provider) ?? ''}/${String(row.model)}`, entry);
+    }
     return {
       byCurrency: currencyRows.map((row) => ({
         currency: String(row.currency),
@@ -1216,6 +1403,9 @@ export class UsageDatabase {
         totalTokens: Number(row.tokens ?? 0),
         totalMicro: Number(row.total_micro ?? 0),
         missingCount: Number(row.missing ?? 0),
+        price: priceMap.get(`${str(row.provider) ?? ''}/${str(row.model) ?? ''}`)
+          ?? priceMap.get(`/${str(row.model) ?? ''}`)
+          ?? null,
       })),
       byDay: [...dayMap.values()].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.currency < b.currency ? -1 : 1)),
       coverage: {
@@ -1288,10 +1478,152 @@ export class UsageDatabase {
 
   /** Export-sized session summaries. */
   exportSessions(): SessionSummaryRow[] {
-    return this.sessionSummaries({ limit: 100_000, offset: 0 }).items;
+    return this.sessionSummaries({ limit: 100_000, offset: 0, unpaged: true }).items;
+  }
+
+  // -------------------------------------------------------------------------
+  // Context monitor (v4).
+
+  /** Idempotent write of one `request/context` sample. */
+  upsertContextSample(sample: {
+    sessionId: string; seq: number; timestamp: number;
+    provider: string | null; model: string | null; contextWindow: number | null;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO context_samples (session_id, seq, timestamp, provider, model, context_window)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_id, seq) DO UPDATE SET
+           timestamp = excluded.timestamp,
+           provider = COALESCE(excluded.provider, context_samples.provider),
+           model = COALESCE(excluded.model, context_samples.model),
+           context_window = COALESCE(excluded.context_window, context_samples.context_window)`,
+      )
+      .run(sample.sessionId, sample.seq, sample.timestamp, sample.provider, sample.model, sample.contextWindow);
+  }
+
+  /**
+   * Derive the context size of the request a usage record settled: its
+   * input + cacheRead + cacheWrite is the context the model was fed, and it
+   * is attributed to every still-open sample of the same session before this
+   * record (the retries/attempts of the same logical request). A record with
+   * no token data closes nothing.
+   */
+  fillContextTokens(record: UsageRecord): void {
+    const input = record.inputTokens;
+    const cacheRead = record.cacheReadTokens;
+    const cacheWrite = record.cacheWriteTokens;
+    if (input === null && cacheRead === null && cacheWrite === null) return;
+    const tokens =
+      (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0);
+    // Fill unfilled samples, and re-fill samples already attributed to THIS
+    // record: a later ledger amendment (e.g. usage corrected) must propagate
+    // into the derived watermark, or replay can never converge. Samples bound
+    // to a different request are never touched.
+    this.db
+      .prepare(
+        `UPDATE context_samples
+           SET context_tokens = ?, request_id = ?
+         WHERE session_id = ? AND seq < ?
+           AND (context_tokens IS NULL OR request_id = ?)`,
+      )
+      .run(tokens, record.requestId, record.sessionId, record.seq, record.requestId);
+  }
+
+  /** Distinct (provider, model) pairs with request/token totals, busiest first. */
+  providerModelPairs(): Array<{
+    provider: string | null; model: string | null;
+    requests: number; tokens: number | null;
+  }> {
+    interface Row {
+      provider: string | null; model: string | null;
+      requests: number; tokens: number | null;
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT provider, model, COUNT(*) AS requests,
+                SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS tokens
+           FROM usage_records
+          GROUP BY provider, model
+          ORDER BY tokens IS NULL, tokens DESC, requests DESC`,
+      )
+      .all() as unknown as Row[];
+    return rows.map((row) => ({
+      provider: typeof row.provider === 'string' ? row.provider : null,
+      model: typeof row.model === 'string' ? row.model : null,
+      requests: Number(row.requests ?? 0),
+      tokens: row.tokens === null || row.tokens === undefined ? null : Number(row.tokens),
+    }));
+  }
+
+  /** Latest + peak sample per session with lineage, title, and compactions. */
+  contextSessions(): Array<{
+    sessionId: string; title: string | null; origin: string | null; parentSessionId: string | null;
+    provider: string | null; model: string | null;
+    contextTokens: number | null; peakTokens: number | null; contextWindow: number | null;
+    timestamp: number; compactions: number; requests: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT cs.session_id, s.title, s.origin, s.parent_session_id, cs.provider, cs.model,
+                cs.context_tokens, cs.context_window, cs.timestamp,
+                (SELECT MAX(c2.context_tokens) FROM context_samples c2 WHERE c2.session_id = cs.session_id) AS peak_tokens,
+                (SELECT COUNT(*) FROM usage_records r
+                  WHERE r.session_id = cs.session_id AND r.kind = 'compaction') AS compactions,
+                (SELECT COUNT(*) FROM usage_records r WHERE r.session_id = cs.session_id) AS requests
+          FROM context_samples cs
+          JOIN sessions s ON s.session_id = cs.session_id
+          WHERE cs.seq = (SELECT MAX(seq) FROM context_samples c2 WHERE c2.session_id = cs.session_id)
+          ORDER BY cs.timestamp DESC`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+    const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
+    return rows.map((row) => ({
+      sessionId: String(row.session_id),
+      title: typeof row.title === 'string' && row.title.length > 0 ? row.title : null,
+      origin: str(row.origin),
+      parentSessionId: str(row.parent_session_id),
+      provider: str(row.provider),
+      model: str(row.model),
+      contextTokens: num(row.context_tokens),
+      peakTokens: num(row.peak_tokens),
+      contextWindow: num(row.context_window),
+      timestamp: Number(row.timestamp),
+      compactions: Number(row.compactions ?? 0),
+      requests: Number(row.requests ?? 0),
+    }));
+  }
+
+  /** Filled samples of one session, ascending (chart series). */
+  contextSamples(sessionId: string): Array<{
+    seq: number; timestamp: number; provider: string | null; model: string | null;
+    contextTokens: number; contextWindow: number | null; requestId: string | null;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT seq, timestamp, provider, model, context_tokens, context_window, request_id
+          FROM context_samples
+          WHERE session_id = ? AND context_tokens IS NOT NULL
+          ORDER BY seq ASC`,
+      )
+      .all(sessionId) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      seq: Number(row.seq),
+      timestamp: Number(row.timestamp),
+      provider: typeof row.provider === 'string' ? row.provider : null,
+      model: typeof row.model === 'string' ? row.model : null,
+      contextTokens: Number(row.context_tokens),
+      contextWindow: typeof row.context_window === 'number' ? row.context_window : null,
+      requestId: typeof row.request_id === 'string' ? row.request_id : null,
+    }));
   }
 
   close(): void {
+    if (this.readOnly) {
+      this.db.close();
+      return;
+    }
     try {
       this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
     } catch {

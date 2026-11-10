@@ -10,16 +10,13 @@
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { SessionRow, UpsertOutcome, UsageRecord } from './domain/types.js';
-import { SessionNormalizer, type SessionHeaderLike } from './collector/normalizer.js';
+import type { ContextSampleInput, SessionRow, UpsertOutcome, UsageRecord } from './domain/types.js';
+import { SessionNormalizer, sessionTitleOf, type SessionHeaderLike } from './collector/normalizer.js';
 import { importHistory, type RecordSink } from './collector/history-importer.js';
 import { reconcileAgainstLogs, type ReconcileSessionQuery } from './collector/reconciler.js';
 import { UsageDatabase } from './storage/database.js';
 import { QueryService } from './query/query-service.js';
-import {
-  matchPrices, normalizeOpenRouter, suggestionYaml, localToday,
-  type SourcePriceEntry,
-} from './domain/price-sources.js';
+import { buildSuggestions, type OpenRouterModel } from './domain/openrouter.js';
 
 export interface UsageCenterConfig {
   /** Absolute SQLite path. Default: $DSH_HOME/dsh-usage-center/usage-center.db */
@@ -36,10 +33,6 @@ export interface UsageCenterConfig {
    * with per-1M-token prices. Append-only and deduplicated by content hash.
    */
   prices?: unknown[];
-  /** Ledger provider id → price-source provider (overrides built-in aliases). */
-  priceAliases?: Record<string, string>;
-  /** Price source listing URL. Default: the OpenRouter model API. */
-  priceSourceUrl?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +44,33 @@ interface HostSession {
   header?: SessionHeaderLike | undefined;
 }
 
+interface CommandsLike {
+  register(definition: {
+    name: string;
+    description: string;
+    handler: () => { kind: string; text: string };
+  }): () => void;
+}
+
+interface ToolsLike {
+  register(definition: {
+    name: string;
+    description: string;
+    output: {
+      schema: Record<string, unknown>;
+      render(args: unknown, value: unknown): unknown;
+    };
+    parameters: Record<string, unknown>;
+    execute(args: unknown): Promise<unknown>;
+  }): () => void;
+}
+
+interface InjectedContext {
+  commands?: CommandsLike;
+  tools?: ToolsLike;
+  webServer?: WebServerLike;
+}
+
 interface HostContext {
   on(event: 'session/event', listener: (session: HostSession, event: {
     type: string;
@@ -60,6 +80,8 @@ interface HostContext {
   }) => void): () => void;
   on(event: 'session/disposed', listener: (session: HostSession) => void): () => void;
   effect<T>(setup: () => Generator<() => void, T, unknown>): void;
+  /** Declare service dependencies; the callback runs once they are available. */
+  inject(deps: string[], callback: (ctx: InjectedContext) => void | (() => void)): void;
   get<K extends string>(name: K): unknown;
   logger: {
     info(...args: unknown[]): void;
@@ -70,6 +92,9 @@ interface HostContext {
 interface NodeRequestLike {
   method?: string | undefined;
   url?: string | undefined;
+  on(event: 'data', listener: (chunk: Buffer) => void): void;
+  on(event: 'end', listener: () => void): void;
+  on(event: 'error', listener: (error: Error) => void): void;
 }
 
 interface NodeResponseLike {
@@ -83,6 +108,16 @@ interface WebServerLike {
     path: string;
     handler: (req: NodeRequestLike, res: NodeResponseLike) => void;
   }): () => void;
+}
+
+interface ConfigEditorLike {
+  edit(
+    entry: unknown,
+    change: (
+      current: Record<string, unknown>,
+      inherited: Record<string, unknown>,
+    ) => Record<string, unknown> | Promise<Record<string, unknown>>,
+  ): Promise<void>;
 }
 
 interface SessionQueryLike {
@@ -130,10 +165,21 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
 
     const sink: RecordSink = {
       writeRecord(record: UsageRecord): UpsertOutcome {
-        return store.upsertRecord(record);
+        const outcome = store.upsertRecord(record);
+        // Always try to fill: on replays the UPDATE matches no open samples
+        // (cheap no-op), while gating on the outcome would leave historical
+        // sessions unfilled forever.
+        store.fillContextTokens(record);
+        return outcome;
       },
       writeSessionRow(row: SessionRow): void {
         store.upsertSession(row);
+      },
+      writeContextSample(sample: ContextSampleInput): void {
+        store.upsertContextSample(sample);
+      },
+      writeSessionTitle(sessionId: string, title: string): void {
+        store.setSessionTitle(sessionId, title);
       },
     };
 
@@ -144,7 +190,11 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
     const ensureTracker = (session: HostSession): SessionNormalizer | undefined => {
       const existing = trackers.get(session.id);
       if (existing !== undefined) return existing;
-      const tracker = new SessionNormalizer(session.id, session.header ?? {});
+      const tracker = new SessionNormalizer(session.id, session.header ?? {}, {
+        // A live orphan retry points at a pre-boot attempt owned by history
+        // import; recording it here would double-count the call for good.
+        orphanRetry: 'ignore',
+      });
       trackers.set(session.id, tracker);
       if (!sessionRowCache.has(session.id)) {
         const header = session.header ?? {};
@@ -157,6 +207,7 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
           origin: typeof header.origin === 'string' ? header.origin : null,
           seedLength: typeof header.seedLength === 'number' ? header.seedLength : null,
           lastSeq: null,
+          title: null,
           updatedAt: Date.now(),
         });
         sessionRowCache.set(session.id, true);
@@ -170,6 +221,10 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
         if (tracker === undefined) return;
         const record = tracker.process(event);
         if (record !== null) sink.writeRecord(record);
+        const sample = tracker.processContext(event);
+        if (sample !== null) sink.writeContextSample?.(sample);
+        const title = sessionTitleOf(event);
+        if (title !== null) sink.writeSessionTitle?.(session.id, title);
         if (typeof event.seq === 'number') {
           sink.writeSessionRow({
             sessionId: session.id,
@@ -179,6 +234,7 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
             origin: null,
             seedLength: null,
             lastSeq: event.seq,
+            title: null,
             updatedAt: Date.now(),
           });
         }
@@ -218,10 +274,15 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
 
     // ----- optional read-only HTTP surface (Node req/res style, verified
     // against the webServer contract used by community plugins) ---------------
+    // Declarative injection, NOT ctx.get(): on a cold boot this plugin row can
+    // activate before the webServer service exists, and a plain get() would
+    // silently miss it (panel then 404s). The injected callback runs whenever
+    // webServer becomes available, and its disposer unregisters the route.
     let offRoute: (() => void) | undefined;
-    try {
-      const webServer = ctx.get('webServer') as WebServerLike | undefined;
-      if (webServer !== undefined && typeof webServer.register === 'function') {
+    ctx.inject(['webServer'], (webCtx) => {
+      const webServer = webCtx.webServer;
+      if (webServer === undefined || typeof webServer.register !== 'function') return;
+      try {
         const send = (res: NodeResponseLike, status: number, payload: unknown): void => {
           const body = JSON.stringify(payload, null, 1);
           res.writeHead(status, {
@@ -230,21 +291,176 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
           });
           res.end(body);
         };
+        const methodNotAllowed = (res: NodeResponseLike): void => {
+          res.writeHead(405, { allow: 'GET, HEAD' });
+          res.end();
+        };
+        const readJsonBody = (req: NodeRequestLike, limit = 65536): Promise<unknown> =>
+          new Promise((resolve, reject) => {
+            const chunks: Buffer[] = [];
+            let size = 0;
+            let failed = false;
+            req.on('data', (chunk: Buffer) => {
+              if (failed) return;
+              size += chunk.length;
+              if (size > limit) {
+                failed = true;
+                reject(new Error('request body too large'));
+                return;
+              }
+              chunks.push(chunk);
+            });
+            req.on('end', () => {
+              if (failed) return;
+              try {
+                resolve(chunks.length === 0 ? {} : JSON.parse(Buffer.concat(chunks).toString('utf8')));
+              } catch (error) {
+                reject(error instanceof Error ? error : new Error('invalid JSON body'));
+              }
+            });
+            req.on('error', (error: Error) => {
+              if (!failed) reject(error);
+            });
+          });
+        const localDateISO = (): string => {
+          const d = new Date();
+          const p = (n: number): string => String(n).padStart(2, '0');
+          return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+        };
+
+        // Manual reference-price import: POST-only, user-confirmed write path.
+        // Nothing here runs unless the costs tab explicitly asks for it.
+        const handleSuggest = async (req: NodeRequestLike, res: NodeResponseLike): Promise<void> => {
+          try {
+            const response = await fetch('https://openrouter.ai/api/v1/models', {
+              headers: { accept: 'application/json' },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!response.ok) throw new Error(`openrouter responded ${response.status}`);
+            const payload = (await response.json()) as { data?: unknown };
+            const list = Array.isArray(payload.data) ? payload.data : [];
+            const orModels: OpenRouterModel[] = [];
+            for (const item of list) {
+              if (item === null || typeof item !== 'object') continue;
+              const record = item as Record<string, unknown>;
+              if (typeof record.id !== 'string' || record.id.length === 0) continue;
+              orModels.push({
+                id: record.id,
+                name: typeof record.name === 'string' ? record.name : null,
+                pricing:
+                  record.pricing !== null && typeof record.pricing === 'object'
+                    ? (record.pricing as Record<string, unknown>)
+                    : null,
+              });
+            }
+            send(res, 200, {
+              source: 'openrouter',
+              fetchedAt: Date.now(),
+              suggestions: buildSuggestions(store.providerModelPairs(), orModels),
+            });
+          } catch (error) {
+            send(res, 502, { error: error instanceof Error ? error.message : String(error) });
+          }
+        };
+        const handleImport = async (req: NodeRequestLike, res: NodeResponseLike): Promise<void> => {
+          try {
+            const body = (await readJsonBody(req)) as {
+              effectiveFrom?: unknown; name?: unknown; models?: unknown;
+            };
+            const rawModels = Array.isArray(body.models) ? body.models : [];
+            if (rawModels.length === 0 || rawModels.length > 500) {
+              send(res, 400, { error: 'models must contain 1–500 entries' });
+              return;
+            }
+            const rows: Array<{
+              provider?: string; model: string;
+              input?: number; output?: number; cacheRead?: number; cacheWrite?: number;
+            }> = [];
+            for (const item of rawModels) {
+              if (item === null || typeof item !== 'object') {
+                send(res, 400, { error: 'invalid models entry' });
+                return;
+              }
+              const record = item as Record<string, unknown>;
+              if (typeof record.model !== 'string' || record.model.length === 0) {
+                send(res, 400, { error: 'models entry missing model' });
+                return;
+              }
+              const price = (key: string): number | undefined => {
+                const value = record[key];
+                if (value === null || value === undefined) return undefined;
+                if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+                  throw new Error(`invalid ${key} for ${record.model}`);
+                }
+                return value;
+              };
+              const row: typeof rows[number] = { model: record.model };
+              if (typeof record.provider === 'string' && record.provider.length > 0) {
+                row.provider = record.provider;
+              }
+              const input = price('input');
+              const output = price('output');
+              const cacheRead = price('cacheRead');
+              const cacheWrite = price('cacheWrite');
+              if (input !== undefined) row.input = input;
+              if (output !== undefined) row.output = output;
+              if (cacheRead !== undefined) row.cacheRead = cacheRead;
+              if (cacheWrite !== undefined) row.cacheWrite = cacheWrite;
+              rows.push(row);
+            }
+            const entry = (ctx as HostContext & { fiber?: { entry?: unknown } }).fiber?.entry;
+            const editor = ctx.get('configEditor') as ConfigEditorLike | undefined;
+            if (entry === undefined || editor === undefined || typeof editor.edit !== 'function') {
+              send(res, 503, {
+                error: 'config editor unavailable in this profile; add the price list to cordis.patch.yml manually',
+              });
+              return;
+            }
+            const effectiveFrom =
+              typeof body.effectiveFrom === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.effectiveFrom)
+                ? body.effectiveFrom
+                : localDateISO();
+            const name =
+              typeof body.name === 'string' && body.name.length > 0
+                ? body.name
+                : `openrouter ${effectiveFrom}`;
+            const newList = { name, currency: 'USD', effectiveFrom, models: rows };
+            await editor.edit(entry, (current) => ({
+              ...current,
+              prices: [...(Array.isArray(current.prices) ? current.prices : []), newList],
+            }));
+            ctx.logger.info(`dsh-usage-center: imported ${rows.length} reference price row(s) from openrouter`);
+            send(res, 200, { ok: true, imported: rows.length, note: 'plugin reloads to apply the new price list' });
+          } catch (error) {
+            send(res, 500, { error: error instanceof Error ? error.message : String(error) });
+          }
+        };
         offRoute = webServer.register({
           kind: 'prefix',
           path: apiPath,
           handler: (req, res) => {
             try {
-              if (req.method !== 'GET' && req.method !== 'HEAD') {
-                res.writeHead(405, { allow: 'GET, HEAD' });
-                res.end();
+              const url = new URL(req.url ?? '/', 'http://localhost');
+              const rest = url.pathname
+                .slice(url.pathname.indexOf(apiPath) + apiPath.length)
+                .replace(/^\/+/, '');
+              if (req.method === 'POST') {
+                if (rest === 'prices/suggest') {
+                  void handleSuggest(req, res);
+                  return;
+                }
+                if (rest === 'prices/import') {
+                  void handleImport(req, res);
+                  return;
+                }
+                methodNotAllowed(res);
                 return;
               }
-              const url = new URL(req.url ?? '/', 'http://localhost');
-              const sub = url.pathname
-                .slice(url.pathname.indexOf(apiPath) + apiPath.length)
-                .replace(/^\/+/, '')
-                .split('/')[0];
+              if (req.method !== 'GET' && req.method !== 'HEAD') {
+                methodNotAllowed(res);
+                return;
+              }
+              const sub = rest.split('/')[0];
               const q = url.searchParams;
               const str = (key: string): string | undefined => {
                 const value = q.get(key);
@@ -257,9 +473,16 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
                 return Number.isFinite(parsed) ? parsed : undefined;
               };
               switch (sub) {
-                case 'health':
-                  send(res, 200, { ok: true, database: dbPath });
+                case 'health': {
+                  let integrations: Record<string, string> = {};
+                  try {
+                    integrations = JSON.parse(store.getMeta('integrations') ?? '{}') as Record<string, string>;
+                  } catch {
+                    integrations = {};
+                  }
+                  send(res, 200, { ok: true, database: dbPath, integrations });
                   return;
+                }
                 case 'summary': {
                   send(res, 200, query.summary({
                     sessionId: str('sessionId'),
@@ -290,7 +513,12 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
                   return;
                 }
                 case 'trend': {
-                  send(res, 200, { points: query.trend(num('days')) });
+                  const by = str('by');
+                  if (by === 'provider' || by === 'model') {
+                    send(res, 200, { by, series: query.trendSeries(by, num('days')) });
+                  } else {
+                    send(res, 200, { by: 'all', points: query.trend(num('days')) });
+                  }
                   return;
                 }
                 case 'breakdown': {
@@ -312,52 +540,11 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
                   }));
                   return;
                 }
+                case 'context': {
+                  send(res, 200, query.context(str('sessionId')));
+                  return;
+                }
                 case 'prices': {
-                  if (url.pathname.split('/').pop() === 'suggest') {
-                    // Reference prices from a public listing: suggestions
-                    // only — applying them stays a config edit by the user.
-                    const sourceUrl = config.priceSourceUrl
-                      ?? 'https://openrouter.ai/api/v1/models';
-                    void (async () => {
-                      try {
-                        const response = await fetch(sourceUrl, {
-                          signal: AbortSignal.timeout(30_000),
-                          headers: { accept: 'application/json' },
-                        });
-                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                        const entries: SourcePriceEntry[] = normalizeOpenRouter(
-                          await response.json(),
-                        );
-                        if (entries.length === 0) throw new Error('empty listing');
-                        const ledger = query.breakdown('model')
-                          .map((row) => ({ provider: row.provider, model: row.model, requests: row.requests }));
-                        const { matches, unmatched } = matchPrices(entries, ledger, config.priceAliases ?? {});
-                        const day = localToday();
-                        send(res, 200, {
-                          source: 'openrouter',
-                          sourceUrl,
-                          currency: 'USD',
-                          fetchedAt: Date.now(),
-                          entries: entries.length,
-                          matches,
-                          unmatched,
-                          yaml: suggestionYaml(matches, {
-                            name: `openrouter-${day}`, currency: 'USD', effectiveFrom: day,
-                          }),
-                        });
-                      } catch (error) {
-                        ctx.logger.warn('dsh-usage-center: price suggest failed', error);
-                        try {
-                          send(res, 502, {
-                            error: `price source unreachable: ${String((error as Error)?.message ?? error)}`,
-                          });
-                        } catch {
-                          // response already started
-                        }
-                      }
-                    })();
-                    return;
-                  }
                   send(res, 200, query.prices());
                   return;
                 }
@@ -437,10 +624,82 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
             }
           },
         });
+      } catch (error) {
+        ctx.logger.warn('dsh-usage-center: webServer route registration skipped', error);
       }
-    } catch (error) {
-      ctx.logger.warn('dsh-usage-center: webServer route registration skipped', error);
-    }
+      // Disposer: unregister when the service goes away (the fiber may re-run).
+      return () => {
+        offRoute?.();
+        offRoute = undefined;
+      };
+    });
+
+    // ----- optional integrations: /usage command + read-only agent tool -----
+    // Cordis services are resolved through declared `ctx.inject([...])`;
+    // registration outcomes are recorded in meta and surfaced by /health so
+    // failures are diagnosable without host logs.
+    const integrations: Record<string, string> = {};
+    const recordIntegration = (key: string, attempt: () => void): void => {
+      try {
+        attempt();
+        integrations[key] = 'ok';
+      } catch (error) {
+        integrations[key] = String((error as Error)?.message ?? error);
+      }
+    };
+    ctx.inject(['commands'], (commandCtx) => {
+      recordIntegration('commands', () => {
+        commandCtx.commands!.register({
+          name: 'usage',
+          description: 'dsh-usage-center: requests, tokens, cache hit rate and top models across all sessions',
+          handler: () => ({ kind: 'success', text: query.usageText('summary') }),
+        });
+      });
+      store.setMeta('integrations', JSON.stringify(integrations));
+    });
+    ctx.inject(['tools'], (toolCtx) => {
+      recordIntegration('tools', () => {
+        toolCtx.tools!.register({
+          name: 'usage_center',
+          description:
+            'Read the local usage ledger collected by dsh-usage-center: totals, today, per-model token usage, or the context monitor. Read-only.',
+          output: {
+            schema: { type: 'object' },
+            render(args: unknown, value: unknown) {
+              return [{ type: 'text', text: JSON.stringify(value, null, 2) }];
+            },
+          },
+          parameters: {
+            type: 'object',
+            properties: {
+              view: {
+                type: 'string',
+                enum: ['summary', 'today', 'models', 'context'],
+                description: 'Which view to return. "context" with sessionId returns that session\'s context samples.',
+              },
+              sessionId: {
+                type: 'string',
+                description: 'Optional session id; used by view "context" for the per-session series.',
+              },
+            },
+            additionalProperties: false,
+          },
+          async execute(args: unknown) {
+            const a = (typeof args === 'object' && args !== null ? args : {}) as {
+              view?: unknown; sessionId?: unknown;
+            };
+            const view = a.view === 'today' || a.view === 'models' || a.view === 'context'
+              ? a.view
+              : 'summary';
+            if (view === 'context' && typeof a.sessionId === 'string' && a.sessionId.length > 0) {
+              return query.context(a.sessionId);
+            }
+            return { view, text: query.usageText(view) };
+          },
+        });
+      });
+      store.setMeta('integrations', JSON.stringify(integrations));
+    });
 
     yield () => {
       offEvent();
