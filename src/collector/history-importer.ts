@@ -1,0 +1,125 @@
+/**
+ * History importer: replays persisted sessions through the same normalizer the
+ * live collector uses, so "history == live" by construction.
+ *
+ * Access path: `ctx.sessionQuery.listSessions()` + `readSession(id)` — the
+ * official live-preferred query service (the same path dsh-usage-stats uses).
+ * Sessions are processed with a small worker pool; every write is an
+ * idempotent upsert, so re-importing is always safe.
+ */
+
+import type { SessionRow, UpsertOutcome, UpsertStats, UsageRecord } from '../domain/types.js';
+import { SessionNormalizer, type SessionHeaderLike } from './normalizer.js';
+
+/** Minimal structural types for the official sessionQuery service. */
+interface SessionRecordLike {
+  header?: (SessionHeaderLike & { id?: string }) | undefined;
+}
+
+interface SessionLogSnapshotLike {
+  /** Verified shape: readSession answers `{ session, events }` where `session` is the SessionHeader. */
+  session?: (SessionHeaderLike & { id?: string }) | undefined;
+  header?: (SessionHeaderLike & { id?: string }) | undefined;
+  events?: ReadonlyArray<{ type: string; seq: number; time: number; data?: unknown }>;
+}
+
+export interface SessionQueryLike {
+  listSessions(signal?: AbortSignal): Promise<readonly SessionRecordLike[]>;
+  readSession(sessionId: string): Promise<SessionLogSnapshotLike>;
+}
+
+/** Where normalized records land (the idempotent ledger). */
+export interface RecordSink {
+  writeRecord(record: UsageRecord): UpsertOutcome;
+  writeSessionRow(row: SessionRow): void;
+}
+
+export interface HistoryImportResult {
+  sessions: number;
+  events: number;
+  records: UpsertStats;
+  errors: Array<{ sessionId: string; error: string }>;
+}
+
+/** Import every persisted session the sessionQuery service lists. */
+export async function importHistory(
+  sessionQuery: SessionQueryLike,
+  sink: RecordSink,
+  options: { concurrency?: number; signal?: AbortSignal } = {},
+): Promise<HistoryImportResult> {
+  const concurrency = Math.min(Math.max(options.concurrency ?? 2, 1), 8);
+  const result: HistoryImportResult = {
+    sessions: 0,
+    events: 0,
+    records: { inserted: 0, updated: 0, unchanged: 0 },
+    errors: [],
+  };
+
+  let records: readonly SessionRecordLike[];
+  try {
+    records = await sessionQuery.listSessions(options.signal);
+  } catch (error) {
+    result.errors.push({
+      sessionId: '<listSessions>',
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return result;
+  }
+
+  const queue = [...records];
+  const stats: UpsertStats = { inserted: 0, updated: 0, unchanged: 0 };
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      if (options.signal?.aborted) return;
+      const record = queue.shift();
+      if (record === undefined) return;
+      const header = record.header ?? {};
+      const sessionId = header.id;
+      if (typeof sessionId !== 'string' || sessionId.length === 0) continue;
+      try {
+        const snapshot = await sessionQuery.readSession(sessionId);
+        const events = Array.isArray(snapshot.events) ? snapshot.events : [];
+        const effectiveHeader = snapshot.session ?? snapshot.header ?? header;
+        const normalizer = new SessionNormalizer(sessionId, effectiveHeader);
+        let lastSeq: number | null = null;
+        for (const event of events) {
+          const usage = normalizer.process(event);
+          if (usage !== null) {
+            const outcome = sink.writeRecord(usage);
+            if (outcome === 'inserted') stats.inserted += 1;
+            else if (outcome === 'updated') stats.updated += 1;
+            else stats.unchanged += 1;
+          }
+          if (typeof event.seq === 'number') lastSeq = event.seq;
+        }
+        sink.writeSessionRow({
+          sessionId,
+          createdAt:
+            typeof effectiveHeader.createdAt === 'number' ? effectiveHeader.createdAt : null,
+          cwd: typeof effectiveHeader.cwd === 'string' ? effectiveHeader.cwd : null,
+          parentSessionId:
+            typeof effectiveHeader.parentSession === 'string'
+              ? effectiveHeader.parentSession
+              : null,
+          origin: typeof effectiveHeader.origin === 'string' ? effectiveHeader.origin : null,
+          seedLength:
+            typeof effectiveHeader.seedLength === 'number' ? effectiveHeader.seedLength : null,
+          lastSeq,
+          updatedAt: Date.now(),
+        });
+        result.sessions += 1;
+        result.events += events.length;
+      } catch (error) {
+        result.errors.push({
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  result.records = { ...stats };
+  return result;
+}

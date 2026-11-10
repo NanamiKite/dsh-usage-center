@@ -1,0 +1,72 @@
+{
+  "name": "dsh-usage-center",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Unified LLM usage statistics, request analytics, cost tracking and token ledger for DeepSeek Harness",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./normalizer": {
+      "default": "./lib/collector/normalizer.js"
+    },
+    "./database": {
+      "default": "./lib/storage/database.js"
+    },
+    "./first-token": {
+      "default": "./lib/domain/first-token.js"
+    },
+    "./client": "./client/index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "lib",
+    "client",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-isolation=none \"test/*.test.mjs\"",
+    "verify:logs": "node scripts/verify-vs-logs.mjs",
+    "check": "tsc --noEmit && node --test --test-isolation=none \"test/*.test.mjs\" && tsc -p tsconfig.build.json"
+  },
+  "engines": {
+    "node": ">=22.19.0 || >=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "token-usage",
+    "usage-statistics",
+    "cost-tracking",
+    "token-ledger"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "~5.9.3"
+  }
+}

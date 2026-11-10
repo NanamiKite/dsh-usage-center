@@ -1,0 +1,5 @@
+# dsh-usage-center bundle patch: inserts the plugin row into the profile.
+- insert:
+    - id: dsh-usage-center
+      name: dsh-usage-center
+      config: {}

@@ -1,0 +1,21 @@
+node_modules/
+lib/
+.pnpm-store/
+.tmp/
+*.log
+
+# machine-local package store config
+.npmrc
+
+# development-time research notes (kept outside the repository)
+research/
+
+# local databases and scratch outputs
+*.db
+*.db-wal
+*.db-shm
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
