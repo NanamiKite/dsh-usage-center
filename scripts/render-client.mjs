@@ -306,6 +306,12 @@ const fakeReact = {
   useState: useStateFake,
   useEffect: useEffectFake,
   useMemo: useMemoFake,
+  useRef(init) {
+    assert.ok(current !== null, 'useRef outside component');
+    const slot = current.hooks[current.i] ??= { current: init };
+    current.i += 1;
+    return slot;
+  },
   useSyncExternalStore: useSyncExternalStoreFake,
 };
 
@@ -416,6 +422,22 @@ const overviewText = textOf(tree);
 assert.match(overviewText, /用量中心/, 'header title rendered');
 assert.match(overviewText, /请求总数/, 'stat cards rendered');
 assert.match(overviewText, /glm\/glm-5\.3/, 'model table rendered');
+
+// Background refresh keeps content mounted: the 15s poll used to swap the
+// panel for a loading view, which collapsed the scroll container and threw
+// a scrolled-down user back to the top.
+const refreshBtn = findButtonWithText(tree, '⟳');
+assert.ok(refreshBtn !== undefined, 'header refresh button present');
+refreshBtn.props.onClick();
+dirty = true;
+tree = renderDashboard(); // registers the new-tick effect closures
+pendingEffects.splice(0).forEach((fn) => fn()); // the fetch starts
+tree = renderDashboard(); // the frame while the request is in flight
+assert.match(textOf(tree), /请求总数/, 'content stays mounted during a background refresh');
+assert.ok(!textOf(tree).includes('加载中'), 'no loading flash on a background poll');
+await settle();
+tree = renderDashboard();
+assert.match(textOf(tree), /请求总数/, 'content intact after the refresh settles');
 
 // Drive every tab via its real button.
 const clickTab = async (label) => {

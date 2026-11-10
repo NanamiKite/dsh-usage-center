@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react');
     const h = React.createElement;
-    const { useState, useEffect, useMemo } = React;
+    const { useState, useEffect, useMemo, useRef } = React;
 
     // ------------------------------------------------------------------ i18n
 
@@ -425,9 +425,19 @@ window.__ModuleLoader__.load({
     function useLoad(build, deps) {
       const [state, setState] = useState({ loading: true, data: null, error: null });
       const [tick, setTick] = useState(0);
+      // A background poll (15s tick or the refresh button) must NOT swap the
+      // panel for a loading state: replacing the content collapses the scroll
+      // container and throws a scrolled-down user back to the top. Only the
+      // first load — or changed inputs, where old data would be WRONG data —
+      // shows the loading view; afterwards data stays mounted until the new
+      // response replaces it.
+      const depsKey = JSON.stringify(deps);
+      const lastKey = useRef(null);
+      const isBackground = lastKey.current === depsKey && state.data !== null;
+      lastKey.current = depsKey;
       useEffect(() => {
         let alive = true;
-        setState((prev) => ({ ...prev, loading: true, error: null }));
+        if (!isBackground) setState({ loading: true, data: null, error: null });
         const jobs = build();
         Promise.all(jobs.map(([, promise]) => promise))
           .then((values) => {
@@ -439,7 +449,11 @@ window.__ModuleLoader__.load({
           .catch((error) => {
             if (!alive) return;
             console.error('dsh-usage-center: dashboard load failed', error);
-            setState({ loading: false, data: null, error: String(error?.message ?? error) });
+            // A failed background poll keeps the last good content; only a
+            // failed initial load surfaces the error view.
+            setState((prev) => (prev.data !== null
+              ? prev
+              : { loading: false, data: null, error: String(error?.message ?? error) }));
           });
         return () => { alive = false; };
         // eslint-disable-next-line react-hooks/exhaustive-deps

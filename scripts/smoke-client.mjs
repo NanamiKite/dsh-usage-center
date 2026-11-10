@@ -61,6 +61,9 @@ const fakeReact = {
   useMemo(factory) {
     return factory();
   },
+  useRef(initial) {
+    return { current: initial };
+  },
   useSyncExternalStore() {
     return 'zh-CN';
   },
