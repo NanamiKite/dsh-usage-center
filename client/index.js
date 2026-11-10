@@ -420,6 +420,12 @@ window.__ModuleLoader__.load({
           heatRamp: [
             { bg: '#c3d0f7' }, { bg: '#8fa6f4' }, { bg: '#4e6ef2' }, { bg: '#2c46c9' },
           ],
+          // Opaque modal surfaces — the 5% translucent bgLayer1 fallback made
+          // dialog text overlap the page behind it (looked like broken paint).
+          modalBg: '#ffffff',
+          modalBgDark: '#22252d',
+          modalText: '#1f2328',
+          modalTextDark: '#e6e8eb',
         };
       }
       const t = (token, literal) => `var(${token}, ${literal})`;
@@ -451,6 +457,12 @@ window.__ModuleLoader__.load({
           { bg: brand, opacity: 0.35 }, { bg: brand, opacity: 0.55 },
           { bg: brand, opacity: 0.78 }, { bg: brand, opacity: 0.95 },
         ],
+        // Themed mode: the token IS an opaque surface color in every DSH
+        // theme, so both schemes reference it directly.
+        modalBg: t('--dsw-alias-bg-layer-1', '#ffffff'),
+        modalBgDark: t('--dsw-alias-bg-layer-1', '#22252d'),
+        modalText: t('--dsw-alias-label-primary', '#1f2328'),
+        modalTextDark: t('--dsw-alias-label-primary', '#e6e8eb'),
       };
     }
 
@@ -542,7 +554,8 @@ select.duc-input{min-width:100px}
 .duc-glyph{color:${colors.labelSecondary}}
 .duc-glyph[data-active=true]{color:inherit}
 .duc-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:60}
-.duc-modal{background:${colors.bgLayer1};border:1px solid ${colors.borderL1};border-radius:10px;width:min(92vw,680px);max-height:80vh;display:flex;flex-direction:column;padding:16px;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+.duc-modal{background:${colors.modalBg};color:${colors.modalText};border:1px solid ${colors.borderL2};border-radius:10px;width:min(92vw,680px);max-height:80vh;display:flex;flex-direction:column;padding:16px;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+@media (prefers-color-scheme: dark){.duc-modal{background:${colors.modalBgDark};color:${colors.modalTextDark}}}
 .duc-modal-title{font-size:14px;font-weight:600;margin:0 0 4px}
 .duc-modal-body{min-height:0;overflow:auto;margin-top:10px}
 .duc-modal-foot{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
