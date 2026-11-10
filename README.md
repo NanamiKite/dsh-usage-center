@@ -9,10 +9,13 @@ DSH 自带的 token 显示只覆盖当前会话。想在一天结束后看"今�
 - **采集**：实时监听 `session/event`，启动时导入全部历史会话；两条路径走同一套归一化逻辑，对同一事件流结果一致。
 - **账本**：每次 LLM 调用一条记录——输入/输出/缓存 token、时长、首字延迟、结束原因、错误信息、子代理谱系。主键 `sessionId:seq`，重复导入零增量；缺失字段存 NULL，不冒充 0。
 - **统计**：按天趋势（含缓存命中率、平均首字延迟）、按模型/提供商/调用类型分解、逐会话台账。日聚合表从账本派生，随时可重建。
+- **费用估算**：在配置里维护版本化价格表（生效日期 + 每 1M token 单价），按请求时间套用对应价格表，整数微单位累计，未覆盖时段与未配置的类别如实留空——估算永远是估算，不是账单。
+- **导出**：请求明细 / 费用 / 会话汇总，CSV（UTF-8 BOM，Excel 直接打开）或 JSON。
+- **对账**：`/report/reconcile` 独立重读全部会话日志并与账本逐字段比对，输出差异报告。
 - **面板**：侧栏"用量中心"全局面板，整页仪表盘分总览/请求/台账/费用/上下文五个页签，趋势图与 26 周活跃热力图，界面语言跟随宿主（中/英）。
 - **HTTP API**：只读 JSON 接口，供脚本和其他工具直接取数。
 
-费用估算和上下文监控还没有实现：费用页与上下文页目前只显示说明，不出任何数字。价格引擎没有落地之前，宁可空白，也不给一个看起来像账单的估算。
+上下文监控还没有实现：上下文页只显示一行空态说明。
 
 ## 安装
 
@@ -35,6 +38,21 @@ pnpm build        # 生成 lib/
 | `importConcurrency` | `2` | 历史导入并发（1–8） |
 | `historyImport` | `true` | 启动时导入历史会话 |
 | `apiPath` | `/dsh-usage-center/v1` | HTTP 查询前缀（客户端面板按默认前缀取数） |
+| `prices` | — | 价格表数组，见下 |
+
+价格表格式（在 cordis.patch.yml 的 config 段，追加即生效、按内容去重）：
+
+```yaml
+prices:
+  - name: 2026-11            # 可选
+    currency: USD            # ISO 4217
+    effectiveFrom: '2026-11-01'   # 本地日期或 epoch ms；此后的请求按本表计价
+    models:
+      - { provider: glm, model: glm-5.3, input: 0.5, output: 1.5, cacheRead: 0.05 }
+      - { model: deepseek-flash, input: 0.27, output: 1.1 }   # 不写 provider 即通配
+```
+
+单价均为**每 1M token**。同一时刻生效日期最新的一张表生效；表内按 精确 provider+model > 通配 provider > 通配 model 取最具体的条目。某类 token 没配价就按未计价处理并计数（覆盖率可见），绝不猜价。
 
 ## HTTP API
 
@@ -43,17 +61,22 @@ pnpm build        # 生成 lib/
 | 路径 | 参数 | 内容 |
 |---|---|---|
 | `/health` | — | 存活检查与数据库路径 |
-| `/summary` | `sessionId` `provider` `model` `kind` `from` `to` `includeSeed` | 总量、今日、按模型/类型 |
+| `/summary` | `sessionId` `provider` `model` `kind` `from` `to` `includeSeed` | 总量、今日、按模型/类型、费用估算汇总 |
 | `/records` | 同上，另加 `limit` `offset` `order` | 请求明细（分页） |
 | `/trend` | `days`（1–366） | 逐日聚合，区间零填充 |
 | `/breakdown` | `by=model\|provider\|kind` | 分组统计 |
 | `/sessions` | `limit` `offset` | 逐会话台账汇总 |
+| `/prices` | — | 已同步的价格表 |
+| `/costs` | `from` `to` | 估算费用（按币种/模型/天 + 覆盖率） |
+| `/export` | `what=records\|costs\|sessions` `format=csv\|json` 及明细筛选 | 文件下载 |
+| `/report/reconcile` | — | 账本 vs 会话日志对账报告（全量重读，秒级） |
 
 ## 局限
 
 - 历史导入每次启动全量重读会话日志。`sessionQuery` 的会话列表不含增量信号，无法在不读日志的前提下判断某个会话没变，因此用幂等换性能。
 - 账本只在本机 SQLite，不联网、不上传。
-- 费用估算、上下文监控见上文。
+- 费用是按你配置的价格表得出的估算，与任何供应商账单无关；不配置价格就不显示金额。
+- 上下文监控未实现。
 
 ## 文档
 

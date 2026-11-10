@@ -188,3 +188,36 @@ export interface SessionSummaryRow {
   firstTimestamp: number | null;
   lastTimestamp: number | null;
 }
+
+// ---------------------------------------------------------------------------
+// Estimated costs (prices are user configuration; results are estimates, in
+// integer micro currency units — never presented as billing).
+
+/** Estimated cost totals for one currency. */
+export interface CostByCurrency {
+  currency: string;
+  requests: number;
+  /** Sum in micro units (1e-6 currency). */
+  totalMicro: number;
+  /** Requests with at least one unpriced token category. */
+  missingCount: number;
+}
+
+/** Estimated cost for one provider/model (one currency). */
+export interface CostByModelRow {
+  provider: string | null;
+  model: string | null;
+  key: string;
+  currency: string;
+  requests: number;
+  totalTokens: number;
+  totalMicro: number;
+  missingCount: number;
+}
+
+/** Estimated cost for one local day (one currency). */
+export interface CostByDayRow {
+  day: string;
+  currency: string;
+  totalMicro: number;
+}

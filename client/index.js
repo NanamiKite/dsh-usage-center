@@ -53,6 +53,9 @@ window.__ModuleLoader__.load({
       'stat.errors': '失败请求',
       'stat.todayRequests': '今日请求',
       'stat.todayTokens': '今日 Token',
+      'stat.estCost': '费用估算',
+      'costs.estimate': '估算',
+      'costs.coverage': '覆盖率',
       'stat.scope.all': '全部时间',
       'card.trend': '按天 Token 趋势',
       'card.heat': '活跃热力图（26 周）',
@@ -75,6 +78,7 @@ window.__ModuleLoader__.load({
       'table.cacheRead': '缓存读',
       'table.cacheWrite': '缓存写',
       'table.total': '合计',
+      'table.cost': '费用',
       'table.cacheHit': '命中率',
       'table.avgFirstToken': '平均首字',
       'table.errors': '错误',
@@ -134,6 +138,9 @@ window.__ModuleLoader__.load({
       'stat.errors': 'Failed requests',
       'stat.todayRequests': 'Requests today',
       'stat.todayTokens': 'Tokens today',
+      'stat.estCost': 'Estimated cost',
+      'costs.estimate': 'Estimates',
+      'costs.coverage': 'Coverage',
       'stat.scope.all': 'all time',
       'card.trend': 'Daily token trend',
       'card.heat': 'Activity heatmap (26 weeks)',
@@ -156,6 +163,7 @@ window.__ModuleLoader__.load({
       'table.cacheRead': 'Cache read',
       'table.cacheWrite': 'Cache write',
       'table.total': 'Total',
+      'table.cost': 'Cost',
       'table.cacheHit': 'Hit rate',
       'table.avgFirstToken': 'Avg first token',
       'table.errors': 'Errors',
@@ -224,6 +232,26 @@ window.__ModuleLoader__.load({
           if (typeof ms !== 'number' || !Number.isFinite(ms)) return '–';
           return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`;
         },
+      };
+    }
+
+    /** Micro currency units → localized amount (more digits for tiny values). */
+    function makeMoneyFormatter(localeTag) {
+      const cache = new Map();
+      return (micro, currency) => {
+        if (typeof micro !== 'number' || !Number.isFinite(micro)) return '–';
+        const value = micro / 1e6;
+        const digits = value >= 100 ? 2 : value >= 1 ? 3 : value >= 0.01 ? 4 : 6;
+        const key = `${currency}|${digits}`;
+        let formatter = cache.get(key);
+        if (formatter === undefined) {
+          formatter = new Intl.NumberFormat(localeTag, {
+            style: 'currency', currency,
+            minimumFractionDigits: digits, maximumFractionDigits: digits,
+          });
+          cache.set(key, formatter);
+        }
+        return formatter.format(value);
       };
     }
 
@@ -498,7 +526,7 @@ select.duc-input{min-width:100px}
     // ------------------------------------------------------------------ tabs
 
     function OverviewTab({ t, fmt, range, data }) {
-      const { totals, today, byModel, trendPoints, heatPoints } = data;
+      const { totals, today, byModel, trendPoints, heatPoints, costs } = data;
       const rangeTotals = trendPoints.reduce((acc, p) => ({
         tokens: acc.tokens + p.totalTokens, requests: acc.requests + p.requests,
       }), { tokens: 0, requests: 0 });
@@ -509,6 +537,13 @@ select.duc-input{min-width:100px}
           h(StatCard, { title: t('stat.cacheHit'), value: fmt.pct(totals.cacheHitRate) }),
           h(StatCard, { title: t('stat.firstToken'), value: fmt.ms(totals.firstTokenMsCount > 0 ? totals.firstTokenMsTotal / totals.firstTokenMsCount : null) }),
           h(StatCard, { title: t('stat.errors'), value: fmt.int(byModel.reduce((acc, r) => acc + r.errorCount, 0)), tone: 'error' }),
+          costs !== null && costs !== undefined && costs.length > 0
+            ? h(StatCard, {
+              title: `≈ ${t('stat.estCost')}`,
+              value: costs.map((c) => fmt.money(c.totalMicro, c.currency)).join(' · '),
+              sub: t('costs.estimate'),
+            })
+            : null,
           h(StatCard, { title: t('stat.todayRequests'), value: fmt.int(today.requests), sub: `${t('stat.todayTokens')} ${fmt.compact(today.totalTokens)}` }),
         ),
         h('div', { className: 'duc-section' },
@@ -714,13 +749,66 @@ select.duc-input{min-width:100px}
       );
     }
 
-    function CostsTab({ t, fmt }) {
+    function CostsTab({ t, fmt, range }) {
+      const from = Date.now() - range * 86_400_000;
       const { loading, data, error, refresh } = useLoad(
-        () => [['res', api('/breakdown', { by: 'model' })]],
-        [],
+        () => [
+          ['costs', api('/costs', { from })],
+          ['basis', api('/breakdown', { by: 'model' })],
+        ],
+        [range],
       );
-      const rows = data?.res?.rows ?? [];
-      return h(StateView, { loading, error, empty: !loading && rows.length === 0, onRetry: refresh, t },
+      const costs = data?.costs;
+      const basisRows = data?.basis?.rows ?? [];
+      if (costs !== undefined && costs.configured) {
+        const { byCurrency, byModel, coverage } = costs;
+        return h(StateView, { loading, error, empty: !loading && byModel.length === 0, onRetry: refresh, t },
+          h('div', { className: 'duc-grid' },
+            byCurrency.map((c) => h(StatCard, {
+              key: c.currency,
+              title: `≈ ${c.currency}`,
+              value: fmt.money(c.totalMicro, c.currency),
+              sub: `${t('costs.estimate')} · ${fmt.int(c.requests)}`,
+            })),
+            h(StatCard, {
+              title: t('costs.coverage'),
+              value: coverage.totalRequests > 0
+                ? `${Math.round((coverage.pricedRequests / coverage.totalRequests) * 100)}%`
+                : '–',
+              sub: `${fmt.int(coverage.pricedRequests)} / ${fmt.int(coverage.totalRequests)}`,
+            }),
+          ),
+          h('div', { className: 'duc-section' },
+            h('div', { className: 'duc-section-head' },
+              h('h3', { className: 'duc-section-title' }, `≈ ${t('costs.estimate')}`),
+              h('span', { className: 'duc-small duc-muted' }, byCurrency.map((c) => c.currency).join(' · ')),
+            ),
+            h('div', { className: 'duc-tablewrap' },
+              h('table', { className: 'duc-table' },
+                h('thead', null, h('tr', null,
+                  h('th', null, t('table.model')),
+                  h('th', { className: 'num' }, t('table.requests')),
+                  h('th', { className: 'num' }, t('table.total')),
+                  h('th', { className: 'num' }, `≈ ${t('table.cost')}`),
+                )),
+                h('tbody', null, byModel.map((row) => h('tr', {
+                  key: `${row.key}|${row.currency}`,
+                  title: row.missingCount > 0 ? `⚠ ${row.missingCount}` : undefined,
+                },
+                  h('td', null, row.key),
+                  h('td', { className: 'num' }, fmt.int(row.requests)),
+                  h('td', { className: 'num' }, fmt.compact(row.totalTokens)),
+                  h('td', { className: 'num' },
+                    fmt.money(row.totalMicro, row.currency),
+                    row.missingCount > 0 ? ' ⚠' : ''),
+                ))),
+              ),
+            ),
+          ),
+        );
+      }
+      // No price lists configured: keep the minimal pricing-basis view.
+      return h(StateView, { loading, error, empty: !loading && basisRows.length === 0, onRetry: refresh, t },
         h('div', { className: 'duc-section' },
           h('div', { className: 'duc-section-head' },
             h('h3', { className: 'duc-section-title' }, t('costs.basis')),
@@ -737,7 +825,7 @@ select.duc-input{min-width:100px}
                 h('th', { className: 'num' }, t('table.cacheWrite')),
                 h('th', { className: 'num' }, t('table.total')),
               )),
-              h('tbody', null, rows.map((row) => h('tr', { key: row.key },
+              h('tbody', null, basisRows.map((row) => h('tr', { key: row.key },
                 h('td', null, row.key),
                 h('td', { className: 'num' }, fmt.int(row.requests)),
                 h('td', { className: 'num' }, fmt.int(row.inputTokens)),
@@ -774,7 +862,10 @@ select.duc-input{min-width:100px}
         return (key, params) => interpolate(dict[key] ?? DICTS.en[key] ?? key, params);
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [lang]);
-      const fmt = useMemo(() => makeFormatters(active), [active]);
+      const fmt = useMemo(() => ({
+        ...makeFormatters(active),
+        money: makeMoneyFormatter(typeof active === 'string' && active.length > 0 ? active : 'en'),
+      }), [active]);
       const overview = useLoad(
         () => [
           ['summary', api('/summary')],
@@ -790,6 +881,7 @@ select.duc-input{min-width:100px}
         byModel: overview.data.models.rows,
         trendPoints: overview.data.trend.points,
         heatPoints: overview.data.heat.points,
+        costs: overview.data.summary.costs,
       } : null;
       return h('div', { className: 'duc-root' },
         h('header', { className: 'duc-header' },
@@ -809,7 +901,7 @@ select.duc-input{min-width:100px}
             }, t(`tabs.${key}`))),
           ),
           h('div', { className: 'duc-spacer' }),
-          tab === 'overview'
+          (tab === 'overview' || tab === 'costs')
             ? h('div', { className: 'duc-range', role: 'group', 'aria-label': t('range.label') },
               [7, 30, 90].map((days) => h('button', {
                 key: days, type: 'button', 'aria-pressed': range === days,
@@ -840,7 +932,7 @@ select.duc-input{min-width:100px}
               setTab('requests');
             },
           }) : null,
-          tab === 'costs' ? h(CostsTab, { t, fmt }) : null,
+          tab === 'costs' ? h(CostsTab, { t, fmt, range }) : null,
           tab === 'context' ? h(ContextTab, { t }) : null,
         ),
       );

@@ -20,6 +20,9 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import type {
   BreakdownDim,
   BreakdownRow,
+  CostByCurrency,
+  CostByModelRow,
+  CostByDayRow,
   DailyStatRow,
   SessionRow,
   SessionSummaryRow,
@@ -28,10 +31,20 @@ import type {
   UsageRecord,
   UsageTotals,
 } from '../domain/types.js';
+import {
+  MISSING_CACHE_READ,
+  MISSING_CACHE_WRITE,
+  MISSING_INPUT,
+  MISSING_OUTPUT,
+  categoryMicro,
+  normalizePriceList,
+  resolvePrice,
+  type ModelPriceConfig,
+} from '../domain/pricing.js';
 
-/** 'dshu' --dsh-usage-center's SQLite application id. */
+/** 'dshu' -- dsh-usage-center's SQLite application id. */
 export const APPLICATION_ID = 0x6473_6875;
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const CREATE_V1 = `
 CREATE TABLE IF NOT EXISTS usage_records (
@@ -111,6 +124,48 @@ CREATE TABLE IF NOT EXISTS daily_stats (
   PRIMARY KEY (day, provider, model)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_daily_stats_day ON daily_stats (day);
+`;
+
+/**
+ * v3: estimated-cost engine. `price_lists` are versioned snapshots synced
+ * from plugin config (append-only, deduplicated by content hash); the
+ * applicable list for a timestamp is the newest one already in effect.
+ * `cost_entries` are a derived cache like `daily_stats`: per-request
+ * estimated costs in integer micro currency units (1e-6), fully rebuildable
+ * from `usage_records` + `price_lists`.
+ */
+const CREATE_V3 = `
+CREATE TABLE IF NOT EXISTS price_lists (
+  id             INTEGER PRIMARY KEY,
+  name           TEXT NOT NULL,
+  currency       TEXT NOT NULL,
+  effective_from INTEGER NOT NULL,
+  source_hash    TEXT NOT NULL UNIQUE,
+  created_at     INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS prices (
+  price_list_id     INTEGER NOT NULL REFERENCES price_lists(id) ON DELETE CASCADE,
+  provider          TEXT NOT NULL DEFAULT '',
+  model             TEXT NOT NULL,
+  input_per_m       REAL,
+  output_per_m      REAL,
+  cache_read_per_m  REAL,
+  cache_write_per_m REAL,
+  PRIMARY KEY (price_list_id, provider, model)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS cost_entries (
+  request_id        TEXT PRIMARY KEY,
+  price_list_id     INTEGER NOT NULL REFERENCES price_lists(id),
+  currency          TEXT NOT NULL,
+  input_micro       INTEGER NOT NULL,
+  output_micro      INTEGER NOT NULL,
+  cache_read_micro  INTEGER NOT NULL,
+  cache_write_micro INTEGER NOT NULL,
+  total_micro       INTEGER NOT NULL,
+  missing_mask      INTEGER NOT NULL,
+  computed_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cost_list ON cost_entries (price_list_id);
 `;
 
 const RECORD_COLUMNS = `
@@ -200,6 +255,10 @@ export class UsageDatabase {
       this.db.exec(CREATE_V2);
       version = 2;
     }
+    if (version < 3) {
+      this.db.exec(CREATE_V3);
+      version = 3;
+    }
     this.db.exec(`PRAGMA application_id = ${APPLICATION_ID};`);
     this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
     this.setMeta('schema_version', String(SCHEMA_VERSION));
@@ -236,6 +295,7 @@ export class UsageDatabase {
     const ts = now();
     if (existing === undefined) {
       this.pendingStatsWrites = true;
+      this.pendingCostWrites = true;
       this.db
         .prepare(
           `INSERT INTO usage_records (
@@ -290,6 +350,7 @@ export class UsageDatabase {
       return 'inserted';
     }
     this.pendingStatsWrites = true;
+    this.pendingCostWrites = true;
     this.db
       .prepare(
         `UPDATE usage_records SET
@@ -597,7 +658,9 @@ export class UsageDatabase {
    * within one process lifetime, and the stamp covers restarts.
    */
   private pendingStatsWrites = false;
+  private pendingCostWrites = false;
   private lastRebuildAt = 0;
+  private lastCostRebuildAt = 0;
 
   /** Local-time calendar day `YYYY-MM-DD` of an epoch-ms timestamp. */
   static dayOf(timestamp: number): string {
@@ -892,6 +955,340 @@ export class UsageDatabase {
       lastTimestamp: typeof row.last_ts === 'number' ? row.last_ts : null,
     }));
     return { items, total };
+  }
+
+  // -------------------------------------------------------------------------
+  // Estimated costs (v3). `cost_entries` is a derived cache over
+  // `usage_records` × `price_lists`; prices come from plugin config and are
+  // synced append-only by content hash. All arithmetic uses integer micro
+  // currency units so aggregations stay exact.
+
+  private static readonly COST_STAMP = 'cost_stamp';
+
+  private priceStamp(): string {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS c, COALESCE(MAX(id), 0) AS m FROM price_lists')
+      .get() as { c: number; m: number };
+    return `${row.c}:${row.m}`;
+  }
+
+  /**
+   * Sync configured price lists into the database (append-only, idempotent
+   * by content hash). Malformed entries are skipped and counted.
+   */
+  syncPriceLists(configs: unknown): { synced: number; skipped: number } {
+    const list = Array.isArray(configs) ? configs : [];
+    let synced = 0;
+    let skipped = 0;
+    const insert = this.db.prepare(
+      `INSERT OR IGNORE INTO price_lists (name, currency, effective_from, source_hash, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    const insertPrice = this.db.prepare(
+      `INSERT OR IGNORE INTO prices (price_list_id, provider, model, input_per_m, output_per_m, cache_read_per_m, cache_write_per_m)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const raw of list) {
+      const normalized = normalizePriceList(raw);
+      if (normalized === null) {
+        skipped += 1;
+        continue;
+      }
+      const result = insert.run(
+        normalized.name, normalized.currency, normalized.effectiveFrom,
+        normalized.hash, now(),
+      );
+      if (result.changes > 0) {
+        const id = (
+          this.db
+            .prepare('SELECT id FROM price_lists WHERE source_hash = ?')
+            .get(normalized.hash) as { id: number }
+        ).id;
+        for (const model of normalized.models) {
+          insertPrice.run(
+            id, model.provider ?? '', model.model,
+            model.input ?? null, model.output ?? null,
+            model.cacheRead ?? null, model.cacheWrite ?? null,
+          );
+        }
+        synced += 1;
+      }
+    }
+    return { synced, skipped };
+  }
+
+  /** Configured price lists with their model counts (read-only view). */
+  listPriceLists(): Array<{
+    id: number; name: string; currency: string; effectiveFrom: number; models: number;
+  }> {
+    return (this.db
+      .prepare(
+        `SELECT l.id, l.name, l.currency, l.effective_from,
+                (SELECT COUNT(*) FROM prices p WHERE p.price_list_id = l.id) AS models
+          FROM price_lists l ORDER BY l.effective_from ASC, l.id ASC`,
+      )
+      .all() as Array<Record<string, unknown>>).map((row) => ({
+      id: Number(row.id),
+      name: String(row.name),
+      currency: String(row.currency),
+      effectiveFrom: Number(row.effective_from),
+      models: Number(row.models),
+    }));
+  }
+
+  costsDirty(): boolean {
+    if (this.pendingCostWrites) return true;
+    const stamp = this.getMeta(UsageDatabase.COST_STAMP);
+    const expected = `${this.maxUpdatedAt()}|${this.priceStamp()}`;
+    return stamp !== expected;
+  }
+
+  /** Full recompute of `cost_entries` in one transaction. */
+  rebuildCosts(): number {
+    const listsRaw = this.db
+      .prepare(
+        `SELECT l.id, l.currency, l.effective_from, p.provider, p.model,
+                p.input_per_m, p.output_per_m, p.cache_read_per_m, p.cache_write_per_m
+          FROM price_lists l JOIN prices p ON p.price_list_id = l.id
+          ORDER BY l.effective_from ASC, l.id ASC`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    const lists = new Map<number, { effectiveFrom: number; currency: string; models: ModelPriceConfig[] }>();
+    for (const row of listsRaw) {
+      const id = Number(row.id);
+      let list = lists.get(id);
+      if (list === undefined) {
+        list = {
+          effectiveFrom: Number(row.effective_from),
+          currency: String(row.currency),
+          models: [],
+        };
+        lists.set(id, list);
+      }
+      const entry: ModelPriceConfig = { model: String(row.model) };
+      const provider = typeof row.provider === 'string' && row.provider.length > 0 ? row.provider : undefined;
+      if (provider !== undefined) entry.provider = provider;
+      const price = (value: unknown): number | undefined =>
+        typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+      const inputPrice = price(row.input_per_m);
+      const outputPrice = price(row.output_per_m);
+      const cacheReadPrice = price(row.cache_read_per_m);
+      const cacheWritePrice = price(row.cache_write_per_m);
+      if (inputPrice !== undefined) entry.input = inputPrice;
+      if (outputPrice !== undefined) entry.output = outputPrice;
+      if (cacheReadPrice !== undefined) entry.cacheRead = cacheReadPrice;
+      if (cacheWritePrice !== undefined) entry.cacheWrite = cacheWritePrice;
+      list.models.push(entry);
+    }
+    const priceLists = [...lists.entries()].map(([id, list]) => ({ id, ...list }));
+    const records = this.db
+      .prepare(
+        'SELECT request_id, provider, model, timestamp, input_tokens, output_tokens, ' +
+          'cache_read_tokens, cache_write_tokens FROM usage_records',
+      )
+      .all() as Array<Record<string, unknown>>;
+    const insert = this.db.prepare(
+      `INSERT INTO cost_entries (
+         request_id, price_list_id, currency,
+         input_micro, output_micro, cache_read_micro, cache_write_micro,
+         total_micro, missing_mask, computed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const stamp = `${this.maxUpdatedAt()}|${this.priceStamp()}`;
+    let rows = 0;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec('DELETE FROM cost_entries');
+      for (const record of records) {
+        const provider = typeof record.provider === 'string' ? record.provider : null;
+        const model = typeof record.model === 'string' ? record.model : null;
+        const resolved = resolvePrice(priceLists, Number(record.timestamp), provider, model);
+        if (resolved === null) continue;
+        const tokens = {
+          input: typeof record.input_tokens === 'number' ? record.input_tokens : null,
+          output: typeof record.output_tokens === 'number' ? record.output_tokens : null,
+          cacheRead: typeof record.cache_read_tokens === 'number' ? record.cache_read_tokens : null,
+          cacheWrite: typeof record.cache_write_tokens === 'number' ? record.cache_write_tokens : null,
+        };
+        const inputMicro = categoryMicro(tokens.input, resolved.entry.input);
+        const outputMicro = categoryMicro(tokens.output, resolved.entry.output);
+        const cacheReadMicro = categoryMicro(tokens.cacheRead, resolved.entry.cacheRead);
+        const cacheWriteMicro = categoryMicro(tokens.cacheWrite, resolved.entry.cacheWrite);
+        let missing = 0;
+        if ((tokens.input ?? 0) > 0 && resolved.entry.input === undefined) missing |= MISSING_INPUT;
+        if ((tokens.output ?? 0) > 0 && resolved.entry.output === undefined) missing |= MISSING_OUTPUT;
+        if ((tokens.cacheRead ?? 0) > 0 && resolved.entry.cacheRead === undefined) missing |= MISSING_CACHE_READ;
+        if ((tokens.cacheWrite ?? 0) > 0 && resolved.entry.cacheWrite === undefined) missing |= MISSING_CACHE_WRITE;
+        insert.run(
+          String(record.request_id), resolved.list.id, resolved.list.currency,
+          inputMicro, outputMicro, cacheReadMicro, cacheWriteMicro,
+          inputMicro + outputMicro + cacheReadMicro + cacheWriteMicro,
+          missing, now(),
+        );
+        rows += 1;
+      }
+      this.setMeta(UsageDatabase.COST_STAMP, stamp);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    this.lastCostRebuildAt = Date.now();
+    this.pendingCostWrites = false;
+    return rows;
+  }
+
+  ensureCostsFresh(maxAgeMs = 2000): void {
+    if (!this.costsDirty()) return;
+    if (Date.now() - this.lastCostRebuildAt < maxAgeMs) return;
+    this.rebuildCosts();
+  }
+
+  /** Aggregated estimated costs over a time range (per currency / model / day). */
+  costAggregates(filters: { from?: number; to?: number } = {}): {
+    byCurrency: CostByCurrency[];
+    byModel: CostByModelRow[];
+    byDay: CostByDayRow[];
+    coverage: { totalRequests: number; pricedRequests: number };
+  } {
+    this.ensureCostsFresh();
+    const { clause, params } = UsageDatabase.WHERE(filters);
+    const totalRequests = (
+      this.db
+        .prepare(`SELECT COUNT(*) AS c FROM usage_records${clause}`)
+        .get(...params) as { c: number }
+    ).c;
+    const currencyRows = this.db
+      .prepare(
+        `SELECT c.currency,
+                COUNT(*) AS requests,
+                SUM(c.total_micro) AS total_micro,
+                SUM(CASE WHEN c.missing_mask != 0 THEN 1 ELSE 0 END) AS missing
+          FROM cost_entries c JOIN usage_records r ON r.request_id = c.request_id${clause}
+          GROUP BY c.currency ORDER BY total_micro DESC`,
+      )
+      .all(...params) as Array<Record<string, unknown>>;
+    const modelRows = this.db
+      .prepare(
+        `SELECT r.provider, r.model, c.currency,
+                COUNT(*) AS requests,
+                SUM(r.total_tokens) AS tokens,
+                SUM(c.total_micro) AS total_micro,
+                SUM(CASE WHEN c.missing_mask != 0 THEN 1 ELSE 0 END) AS missing
+          FROM cost_entries c JOIN usage_records r ON r.request_id = c.request_id${clause}
+          GROUP BY r.provider, r.model, c.currency
+          ORDER BY total_micro DESC`,
+      )
+      .all(...params) as Array<Record<string, unknown>>;
+    // Day buckets are folded in JS local time (same rule as daily_stats).
+    const dayRows = this.db
+      .prepare(
+        `SELECT r.timestamp, c.currency, c.total_micro
+          FROM cost_entries c JOIN usage_records r ON r.request_id = c.request_id${clause}`,
+      )
+      .all(...params) as Array<Record<string, unknown>>;
+    const dayMap = new Map<string, CostByDayRow>();
+    for (const row of dayRows) {
+      const day = UsageDatabase.dayOf(Number(row.timestamp));
+      const currency = String(row.currency);
+      const key = `${day}|${currency}`;
+      let bucket = dayMap.get(key);
+      if (bucket === undefined) {
+        bucket = { day, currency, totalMicro: 0 };
+        dayMap.set(key, bucket);
+      }
+      bucket.totalMicro += Number(row.total_micro ?? 0);
+    }
+    const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+    return {
+      byCurrency: currencyRows.map((row) => ({
+        currency: String(row.currency),
+        requests: Number(row.requests ?? 0),
+        totalMicro: Number(row.total_micro ?? 0),
+        missingCount: Number(row.missing ?? 0),
+      })),
+      byModel: modelRows.map((row) => ({
+        provider: str(row.provider),
+        model: str(row.model),
+        key: `${str(row.provider) ?? '?'}/${str(row.model) ?? '?'}`,
+        currency: String(row.currency),
+        requests: Number(row.requests ?? 0),
+        totalTokens: Number(row.tokens ?? 0),
+        totalMicro: Number(row.total_micro ?? 0),
+        missingCount: Number(row.missing ?? 0),
+      })),
+      byDay: [...dayMap.values()].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.currency < b.currency ? -1 : 1)),
+      coverage: {
+        totalRequests,
+        pricedRequests: currencyRows.reduce((acc, row) => acc + Number(row.requests ?? 0), 0),
+      },
+    };
+  }
+
+  /** Per-request rows joined with the ledger facts (export / audit). */
+  costRows(filters: { from?: number; to?: number } = {}, limit = 100_000): Array<Record<string, unknown>> {
+    this.ensureCostsFresh();
+    const { clause, params } = UsageDatabase.WHERE(filters);
+    return this.db
+      .prepare(
+        `SELECT r.request_id, r.session_id, r.timestamp, r.provider, r.model, r.kind,
+                r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens,
+                r.total_tokens, c.currency, c.input_micro, c.output_micro,
+                c.cache_read_micro, c.cache_write_micro, c.total_micro, c.missing_mask
+          FROM cost_entries c JOIN usage_records r ON r.request_id = c.request_id${clause}
+          ORDER BY r.timestamp DESC LIMIT ?`,
+      )
+      .all(...params, Math.min(Math.max(limit, 1), 100_000)) as Array<Record<string, unknown>>;
+  }
+
+  /** Per-session usage sums for reconciliation (no pagination cap). */
+  usageBySession(): Map<string, {
+    requests: number; inputTokens: number; outputTokens: number;
+    cacheReadTokens: number; cacheWriteTokens: number; totalTokens: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT session_id, COUNT(*) AS requests,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens
+          FROM usage_records GROUP BY session_id`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    const map = new Map<string, {
+      requests: number; inputTokens: number; outputTokens: number;
+      cacheReadTokens: number; cacheWriteTokens: number; totalTokens: number;
+    }>();
+    for (const row of rows) {
+      map.set(String(row.session_id), {
+        requests: Number(row.requests ?? 0),
+        inputTokens: Number(row.input_tokens ?? 0),
+        outputTokens: Number(row.output_tokens ?? 0),
+        cacheReadTokens: Number(row.cache_read_tokens ?? 0),
+        cacheWriteTokens: Number(row.cache_write_tokens ?? 0),
+        totalTokens: Number(row.total_tokens ?? 0),
+      });
+    }
+    return map;
+  }
+
+  /** Export-sized record listing (single bounded scan, ascending). */
+  exportRecords(filters: {
+    sessionId?: string; provider?: string; model?: string; kind?: string;
+    from?: number; to?: number; includeSeed?: boolean;
+  } = {}): UsageRecord[] {
+    const { clause, params } = UsageDatabase.WHERE(filters);
+    const rows = this.db
+      .prepare(`SELECT * FROM usage_records${clause} ORDER BY timestamp ASC, seq ASC LIMIT 100000`)
+      .all(...params) as Array<Record<string, unknown>>;
+    return rows.map(UsageDatabase.recordFromRow);
+  }
+
+  /** Export-sized session summaries. */
+  exportSessions(): SessionSummaryRow[] {
+    return this.sessionSummaries({ limit: 100_000, offset: 0 }).items;
   }
 
   close(): void {

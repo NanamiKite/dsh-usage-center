@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import type { SessionRow, UpsertOutcome, UsageRecord } from './domain/types.js';
 import { SessionNormalizer, type SessionHeaderLike } from './collector/normalizer.js';
 import { importHistory, type RecordSink } from './collector/history-importer.js';
+import { reconcileAgainstLogs, type ReconcileSessionQuery } from './collector/reconciler.js';
 import { UsageDatabase } from './storage/database.js';
 import { QueryService } from './query/query-service.js';
 
@@ -25,6 +26,12 @@ export interface UsageCenterConfig {
   historyImport?: boolean;
   /** HTTP prefix for the read-only query API. Default /dsh-usage-center/v1 */
   apiPath?: string;
+  /**
+   * Estimated-cost price lists. Each list: `{ name?, currency, effectiveFrom,
+   * models: [{ provider?, model, input?, output?, cacheRead?, cacheWrite? }] }`
+   * with per-1M-token prices. Append-only and deduplicated by content hash.
+   */
+  prices?: unknown[];
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +103,23 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
     const store = new UsageDatabase(dbPath);
     const query = new QueryService(store);
 
+    // ----- price lists from config (append-only, hash-deduplicated) -------
+    if (config.prices !== undefined) {
+      try {
+        const sync = store.syncPriceLists(config.prices);
+        if (sync.synced > 0) {
+          ctx.logger.info(`dsh-usage-center: synced ${sync.synced} price list(s) from config`);
+        }
+        if (sync.skipped > 0) {
+          ctx.logger.warn(`dsh-usage-center: skipped ${sync.skipped} malformed price list(s)`);
+        }
+      } catch (error) {
+        ctx.logger.warn('dsh-usage-center: price list sync failed', error);
+      }
+    }
+
+    const sessionQuery = ctx.get('sessionQuery') as SessionQueryLike | undefined;
+
     const sink: RecordSink = {
       writeRecord(record: UsageRecord): UpsertOutcome {
         return store.upsertRecord(record);
@@ -161,7 +185,6 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
 
     // ----- history import ---------------------------------------------------
     if (config.historyImport !== false) {
-      const sessionQuery = ctx.get('sessionQuery') as SessionQueryLike | undefined;
       if (sessionQuery !== undefined && typeof sessionQuery.listSessions === 'function') {
         void importHistory(sessionQuery, sink, {
           concurrency: config.importConcurrency ?? 2,
@@ -279,6 +302,73 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
                     limit: num('limit'),
                     offset: num('offset'),
                   }));
+                  return;
+                }
+                case 'prices': {
+                  send(res, 200, query.prices());
+                  return;
+                }
+                case 'costs': {
+                  send(res, 200, query.costs({
+                    from: num('from'),
+                    to: num('to'),
+                  }));
+                  return;
+                }
+                case 'export': {
+                  const what = str('what') ?? 'records';
+                  if (what !== 'records' && what !== 'costs' && what !== 'sessions') {
+                    send(res, 400, { error: `unknown export "${what}"` });
+                    return;
+                  }
+                  const filters = {
+                    sessionId: str('sessionId'),
+                    provider: str('provider'),
+                    model: str('model'),
+                    kind: str('kind'),
+                    from: num('from'),
+                    to: num('to'),
+                  };
+                  const stamp = new Date().toISOString().slice(0, 10);
+                  if (str('format') === 'json') {
+                    const body = JSON.stringify(query.exportJson(what, filters));
+                    res.writeHead(200, {
+                      'content-type': 'application/json; charset=utf-8',
+                      'content-disposition': `attachment; filename="usage-center-${what}-${stamp}.json"`,
+                      'cache-control': 'no-store',
+                    });
+                    res.end(body);
+                    return;
+                  }
+                  const csv = `\uFEFF${query.exportCsv(what, filters)}`;
+                  res.writeHead(200, {
+                    'content-type': 'text/csv; charset=utf-8',
+                    'content-disposition': `attachment; filename="usage-center-${what}-${stamp}.csv"`,
+                    'cache-control': 'no-store',
+                  });
+                  res.end(csv);
+                  return;
+                }
+                case 'report': {
+                  const subReport = url.pathname.split('/').pop();
+                  if (subReport !== 'reconcile') {
+                    send(res, 404, { error: 'not found' });
+                    return;
+                  }
+                  if (sessionQuery === undefined || typeof sessionQuery.listSessions !== 'function') {
+                    send(res, 503, { error: 'sessionQuery unavailable' });
+                    return;
+                  }
+                  void reconcileAgainstLogs(sessionQuery as ReconcileSessionQuery, store)
+                    .then((report) => send(res, 200, report))
+                    .catch((error: unknown) => {
+                      ctx.logger.warn('dsh-usage-center: reconcile failed', error);
+                      try {
+                        send(res, 500, { error: 'reconcile failed' });
+                      } catch {
+                        // response already started
+                      }
+                    });
                   return;
                 }
                 default:

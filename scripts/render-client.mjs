@@ -62,6 +62,19 @@ function payloadFor(path) {
       totals: { requests: 600, inputTokens: 2_000_000, outputTokens: 900_000, cacheReadTokens: 60_000_000, cacheWriteTokens: 0, reasoningTokens: 0, totalTokens: 63_000_000, cacheHitRate: 0.97, durationMsTotal: 0, durationMsCount: 0, firstTokenMsTotal: 0, firstTokenMsCount: 0 },
       today: { requests: 299, inputTokens: 1_000_000, outputTokens: 300_000, cacheReadTokens: 45_000_000, cacheWriteTokens: 0, reasoningTokens: 0, totalTokens: 47_000_000, cacheHitRate: 0.97, durationMsTotal: 0, durationMsCount: 0, firstTokenMsTotal: 0, firstTokenMsCount: 0 },
       byModel: [], byKind: [], sessions: [], ledger: { records: 600, firstTimestamp: 1, lastTimestamp: 2 },
+      costs: [{ currency: 'USD', requests: 590, totalMicro: 12_345_678, missingCount: 1 }],
+    };
+  }
+  if (path.startsWith('/costs')) {
+    return {
+      configured: true,
+      byCurrency: [{ currency: 'USD', requests: 590, totalMicro: 12_345_678, missingCount: 1 }],
+      byModel: [{
+        provider: 'glm', model: 'glm-5.3', key: 'glm/glm-5.3', currency: 'USD',
+        requests: 500, totalTokens: 61_000_000, totalMicro: 12_000_000, missingCount: 1,
+      }],
+      byDay: [{ day: '2026-11-10', currency: 'USD', totalMicro: 500_000 }],
+      coverage: { totalRequests: 600, pricedRequests: 590 },
     };
   }
   if (path.startsWith('/trend')) return { points: trendPoints };

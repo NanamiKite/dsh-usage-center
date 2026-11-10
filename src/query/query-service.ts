@@ -8,11 +8,13 @@
 import type {
   BreakdownDim,
   BreakdownRow,
+  CostByCurrency,
   SessionSummaryRow,
   TrendPoint,
   UsageTotals,
 } from '../domain/types.js';
 import type { UsageDatabase } from '../storage/database.js';
+import { toCsv } from '../domain/csv.js';
 
 export interface UsageFilters {
   sessionId?: string;
@@ -49,6 +51,8 @@ export interface SummaryResult {
     recordCount: number;
   }>;
   ledger: { records: number; firstTimestamp: number | null; lastTimestamp: number | null };
+  /** Estimated totals per currency, or null when no price list is synced. */
+  costs: CostByCurrency[] | null;
 }
 
 function startOfLocalDay(epochMs: number): number {
@@ -93,6 +97,9 @@ export class QueryService {
         firstTimestamp: ledgerRow.first ?? null,
         lastTimestamp: ledgerRow.last ?? null,
       },
+      costs: this.store.listPriceLists().length > 0
+        ? this.store.costAggregates().byCurrency
+        : null,
     };
   }
 
@@ -135,5 +142,106 @@ export class QueryService {
     total: number;
   } {
     return this.store.sessionSummaries(query);
+  }
+
+  // -------------------------------------------------------------------------
+  // Estimated costs and exports.
+
+  /** Configured price lists (read-only view of the synced config). */
+  prices(): { configured: boolean; lists: ReturnType<UsageDatabase['listPriceLists']> } {
+    const lists = this.store.listPriceLists();
+    return { configured: lists.length > 0, lists };
+  }
+
+  /** Aggregated estimated costs, or `configured: false` with no prices. */
+  costs(filters: { from?: number; to?: number } = {}): {
+    configured: boolean;
+    byCurrency?: CostByCurrency[];
+    byModel?: ReturnType<UsageDatabase['costAggregates']>['byModel'];
+    byDay?: ReturnType<UsageDatabase['costAggregates']>['byDay'];
+    coverage?: { totalRequests: number; pricedRequests: number };
+  } {
+    if (this.store.listPriceLists().length === 0) return { configured: false };
+    const aggregates = this.store.costAggregates(filters);
+    return { configured: true, ...aggregates };
+  }
+
+  /** Row shaping shared by the CSV and JSON exports. */
+  exportData(
+    what: 'records' | 'costs' | 'sessions',
+    filters: { sessionId?: string; provider?: string; model?: string; kind?: string; from?: number; to?: number } = {},
+  ): { headers: string[]; rows: Array<Array<string | number | null>> } {
+    const iso = (ts: number | null): string | null =>
+      typeof ts === 'number' ? new Date(ts).toISOString() : null;
+    if (what === 'records') {
+      const items = this.store.exportRecords(filters);
+      return {
+        headers: [
+          'request_id', 'session_id', 'timestamp_iso', 'provider', 'model', 'kind',
+          'turn', 'step', 'origin', 'input_tokens', 'output_tokens',
+          'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens', 'total_tokens',
+          'duration_ms', 'first_token_latency_ms', 'finish_reason', 'error_code',
+        ],
+        rows: items.map((r) => [
+          r.requestId, r.sessionId, iso(r.timestamp), r.provider, r.model, r.kind,
+          r.turn, r.step, r.origin, r.inputTokens, r.outputTokens,
+          r.cacheReadTokens, r.cacheWriteTokens, r.reasoningTokens, r.totalTokens,
+          r.durationMs, r.firstTokenLatencyMs, r.finishReason, r.errorCode,
+        ]),
+      };
+    }
+    if (what === 'costs') {
+      const items = this.store.costRows(filters);
+      const cell = (value: unknown): string | number | null =>
+        typeof value === 'string' || typeof value === 'number' || value === null ? value : null;
+      return {
+        headers: [
+          'request_id', 'session_id', 'timestamp_iso', 'provider', 'model', 'kind',
+          'currency', 'input_tokens', 'output_tokens', 'cache_read_tokens',
+          'cache_write_tokens', 'total_tokens', 'input_cost_micro',
+          'output_cost_micro', 'cache_read_cost_micro', 'cache_write_cost_micro',
+          'total_cost_micro', 'missing_mask',
+        ],
+        rows: items.map((r) => [
+          cell(r.request_id), cell(r.session_id), iso(typeof r.timestamp === 'number' ? r.timestamp : null),
+          cell(r.provider), cell(r.model), cell(r.kind), cell(r.currency),
+          cell(r.input_tokens), cell(r.output_tokens), cell(r.cache_read_tokens),
+          cell(r.cache_write_tokens), cell(r.total_tokens), cell(r.input_micro),
+          cell(r.output_micro), cell(r.cache_read_micro), cell(r.cache_write_micro),
+          cell(r.total_micro), cell(r.missing_mask),
+        ]),
+      };
+    }
+    const items = this.store.exportSessions();
+    return {
+      headers: [
+        'session_id', 'created_at_iso', 'cwd', 'origin', 'parent_session_id',
+        'requests', 'input_tokens', 'output_tokens', 'cache_read_tokens',
+        'cache_write_tokens', 'total_tokens', 'errors',
+        'first_timestamp_iso', 'last_timestamp_iso',
+      ],
+      rows: items.map((s) => [
+        s.sessionId, iso(s.createdAt), s.cwd, s.origin, s.parentSessionId,
+        s.requests, s.inputTokens, s.outputTokens, s.cacheReadTokens,
+        s.cacheWriteTokens, s.totalTokens, s.errorCount,
+        iso(s.firstTimestamp), iso(s.lastTimestamp),
+      ]),
+    };
+  }
+
+  /** CSV body for an export (BOM is added by the HTTP layer). */
+  exportCsv(what: 'records' | 'costs' | 'sessions', filters: Parameters<QueryService['exportData']>[1]): string {
+    const { headers, rows } = this.exportData(what, filters);
+    return toCsv(headers, rows);
+  }
+
+  /** JSON documents for an export. */
+  exportJson(what: 'records' | 'costs' | 'sessions', filters: Parameters<QueryService['exportData']>[1]): unknown[] {
+    const { headers, rows } = this.exportData(what, filters);
+    return rows.map((row) => {
+      const object: Record<string, string | number | null> = {};
+      headers.forEach((header, index) => { object[header] = row[index] ?? null; });
+      return object;
+    });
   }
 }
