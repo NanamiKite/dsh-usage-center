@@ -33,7 +33,8 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "docs/*.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
