@@ -36,7 +36,7 @@ DSH 自带的 token 显示只覆盖当前会话。想在一天结束后看"今�
 前置：DSH 桌面版（Web GUI）。
 
 ```sh
-git clone <本仓库> dsh-usage-center
+git clone https://github.com/NanamiKite/dsh-usage-center
 cd dsh-usage-center
 pnpm install
 pnpm build        # 生成 lib/
