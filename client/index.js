@@ -99,7 +99,7 @@ window.__ModuleLoader__.load({
       'filter.model': '模型…',
       'filter.kind': '类型…',
       'filter.allSessions': '全部会话',
-      'filter.searchSession': '搜索会话（名称 / ID / 路径）…',
+      'filter.searchSession': '搜索会话…',
       'filter.clear': '清除筛选',
       'page.prev': '上一页',
       'page.next': '下一页',
@@ -115,8 +115,8 @@ window.__ModuleLoader__.load({
       'status.error': '失败',
       'costs.basis': '模型用量',
       'costs.pending': '未配置价格 — 点「参考价…」导入后可估算',
-      'costs.notCovered': '价格表自 {date} 起生效：此前的请求不追溯计价（没有公开历史价，不猜）。若价格在更早时段确实相同，把配置里该表的 effectiveFrom 改早即可覆盖那段历史',
-      'costs.retroNote': '含 {n} 条回溯估算：早于首张价格表的请求按首张表单价估算（近似口径，非精确历史价）',
+      'costs.notCovered': '价格表自 {date} 起生效，此前的请求不计价；需要覆盖可改早 effectiveFrom',
+      'costs.retroNote': '含 {n} 条回溯估算（近似口径）',
       'costs.price': '单价 /1M',
       'costs.suggest': '参考价…',
       'costs.imported': '参考价已写入配置，重启 DSH 后生效',
@@ -129,6 +129,13 @@ window.__ModuleLoader__.load({
       'suggest.match.fuzzy': '近似',
       'suggest.match.none': '无匹配',
       'suggest.fetching': '正在从 OpenRouter 拉取…',
+      'suggest.history.title': '检测到 {n} 条早于今天的请求（最早 {date}）',
+      'suggest.history.today': '自今天生效',
+      'suggest.history.today.hint': '早于生效日的请求不计价',
+      'suggest.history.earlier': '提前至 {date}',
+      'suggest.history.earlier.hint': '该日期起的请求按此表计价（价格未变时适用）',
+      'suggest.history.retro': '开启回溯估算',
+      'suggest.history.retro.hint': '早于首张表的请求按此表估算，界面标注近似口径',
       'suggest.import': '导入所选',
       'suggest.importing': '导入中…',
       'suggest.cancel': '取消',
@@ -172,7 +179,7 @@ window.__ModuleLoader__.load({
       'context.afterFirst': '压缩后首次输入',
       'context.obsDiff': '压缩前后观测差额',
       'context.obsRatio': '比例',
-      'context.obsDiffNote': '差额与比例来自压缩前后两次输入的对比，不代表实际节省量；费用为估算，非账单',
+      'context.obsDiffNote': '差额与比例为两次观测之对比，非实际节省量；费用为估算',
       'context.noCompactions': '无压缩记录',
       'context.emptyHint': '插件记录到用量后此处显示会话',
       'context.chartHint': '悬停查看数值 · 点击查看请求详情',
@@ -252,7 +259,7 @@ window.__ModuleLoader__.load({
       'filter.model': 'Model…',
       'filter.kind': 'Kind…',
       'filter.allSessions': 'All sessions',
-      'filter.searchSession': 'Search sessions (name / id / path)…',
+      'filter.searchSession': 'Search sessions…',
       'filter.clear': 'Clear filters',
       'page.prev': 'Previous',
       'page.next': 'Next',
@@ -268,8 +275,8 @@ window.__ModuleLoader__.load({
       'status.error': 'Error',
       'costs.basis': 'Model usage',
       'costs.pending': 'No prices configured — click "Reference prices…" to import',
-      'costs.notCovered': 'The price list applies from {date}: earlier requests are not priced retroactively (no public price history, so nothing is guessed). If the same price genuinely applied earlier, set an earlier effectiveFrom in the config',
-      'costs.retroNote': 'Includes {n} retroactively priced requests: calls before the first price list are estimated at that list’s rates (an approximation, not exact historical prices)',
+      'costs.notCovered': 'Applies from {date}; earlier requests stay unpriced — set an earlier effectiveFrom to cover them',
+      'costs.retroNote': 'Includes {n} retroactively priced requests (approximation)',
       'costs.price': 'Price /1M',
       'costs.suggest': 'Reference prices…',
       'costs.imported': 'Reference prices written to config; applies after DSH restarts',
@@ -282,6 +289,13 @@ window.__ModuleLoader__.load({
       'suggest.match.fuzzy': 'approx.',
       'suggest.match.none': 'no match',
       'suggest.fetching': 'Fetching from OpenRouter…',
+      'suggest.history.title': '{n} requests predate today (earliest {date})',
+      'suggest.history.today': 'From today',
+      'suggest.history.today.hint': 'Earlier requests stay unpriced',
+      'suggest.history.earlier': 'Backdate to {date}',
+      'suggest.history.earlier.hint': 'Requests from that date are priced by this list (when the price truly applied)',
+      'suggest.history.retro': 'Retroactive estimation',
+      'suggest.history.retro.hint': 'Pre-history is estimated at this list; labeled as an approximation',
       'suggest.import': 'Import selected',
       'suggest.importing': 'Importing…',
       'suggest.cancel': 'Cancel',
@@ -325,7 +339,7 @@ window.__ModuleLoader__.load({
       'context.afterFirst': 'First input after',
       'context.obsDiff': 'Observed before/after drop',
       'context.obsRatio': 'Ratio',
-      'context.obsDiffNote': 'The drop and ratio compare the inputs right before and after a compaction; they are not actual savings, and cost figures are estimates, not bills.',
+      'context.obsDiffNote': 'Drop and ratio compare two observations, not actual savings; costs are estimates',
       'context.noCompactions': 'No compaction records',
       'context.emptyHint': 'sessions appear here once the plugin records usage',
       'context.chartHint': 'Hover for values · Click for request detail',
@@ -1281,13 +1295,18 @@ select.duc-input{min-width:100px}
     }
 
     /** Manual reference-price import: fetch OpenRouter on demand, write only
-     *  the rows the user confirmed. Nothing here runs without a click. */
+     *  the rows the user confirmed. Nothing here runs without a click. When
+     *  the ledger holds requests older than the default effective date, the
+     *  dialog offers the history choice right here: start today (history
+     *  unpriced), backdate the effective date, or enable the opt-in
+     *  retroactive estimation mode. */
     function SuggestModal({ t, fmt, onClose, onImported }) {
-      const [state, setState] = useState({ loading: true, error: null, suggestions: [] });
+      const [state, setState] = useState({ loading: true, error: null, suggestions: [], history: null });
       const [checked, setChecked] = useState({});
       const [fetched, setFetched] = useState(false);
       const [importing, setImporting] = useState(false);
       const [importError, setImportError] = useState(null);
+      const [historyChoice, setHistoryChoice] = useState('today');
       useEffect(() => {
         if (fetched) return;
         setFetched(true);
@@ -1299,11 +1318,14 @@ select.duc-input{min-width:100px}
             const map = {};
             for (const s of suggestions) map[`${s.provider ?? ''}/${s.model}`] = s.checked === true;
             setChecked(map);
-            setState({ loading: false, error: null, suggestions });
+            setState({
+              loading: false, error: null, suggestions,
+              history: payload?.historyBefore ?? null,
+            });
           })
           .catch((error) => {
             if (!alive) return;
-            setState({ loading: false, error: String(error?.message ?? error), suggestions: [] });
+            setState({ loading: false, error: String(error?.message ?? error), suggestions: [], history: null });
           });
         return () => { alive = false; };
       }, []);
@@ -1328,6 +1350,25 @@ select.duc-input{min-width:100px}
       const matchTag = (s) => s.matchQuality === null
         ? t('suggest.match.none')
         : t(`suggest.match.${s.matchQuality}`);
+      const history = state.history;
+      const firstDate = history !== null && typeof history.first === 'number'
+        ? (() => {
+            const d = new Date(history.first);
+            const p = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+          })()
+        : null;
+      const historyOption = (value, text, hint) => h('label', {
+        style: { display: 'flex', gap: 6, alignItems: 'baseline', cursor: 'pointer' },
+        title: hint,
+      },
+        h('input', {
+          type: 'radio', name: 'importHistory', value,
+          checked: historyChoice === value,
+          onClick: () => setHistoryChoice(value),
+        }),
+        h('span', null, text),
+      );
       const doImport = () => {
         setImporting(true);
         setImportError(null);
@@ -1340,6 +1381,8 @@ select.duc-input{min-width:100px}
             cacheRead: s.cacheRead ?? undefined,
             cacheWrite: s.cacheWrite ?? undefined,
           })),
+          ...(historyChoice === 'earlier' && firstDate !== null ? { effectiveFrom: firstDate } : {}),
+          ...(historyChoice === 'retro' ? { retroactive: true } : {}),
         })
           .then(() => { setImporting(false); onImported(); })
           .catch((error) => {
@@ -1361,29 +1404,49 @@ select.duc-input{min-width:100px}
                     h('br'),
                     h('button', { type: 'button', className: 'duc-iconbtn', onClick: onClose }, t('suggest.cancel')),
                   )
-                : h('div', { className: 'duc-tablewrap' },
-                    h('table', { className: 'duc-table' },
-                      h('thead', null, h('tr', null,
-                        h('th', null),
-                        h('th', null, t('table.model')),
-                        h('th', null, t('suggest.match')),
-                        h('th', { className: 'num' }, t('costs.price')),
-                      )),
-                      h('tbody', null, state.suggestions.map((s) => h('tr', { key: keyOf(s) },
-                        h('td', null,
-                          h('input', {
-                            type: 'checkbox',
-                            'aria-label': s.model,
-                            checked: checked[keyOf(s)] === true,
-                            disabled: s.matchId === null,
-                            onClick: () => setChecked((prev) => ({ ...prev, [keyOf(s)]: !(prev[keyOf(s)] === true) })),
-                          })),
-                        h('td', null, `${s.provider ?? '?'} / ${s.model}`),
-                        h('td', { className: 'duc-small', title: s.matchId ?? undefined },
-                          s.matchId === null ? t('suggest.match.none') : `${s.matchId} (${matchTag(s)})`),
-                        h('td', { className: 'num duc-small' }, priceCell(s)),
-                      ))),
+                : h('div', null,
+                    h('div', { className: 'duc-tablewrap' },
+                      h('table', { className: 'duc-table' },
+                        h('thead', null, h('tr', null,
+                          h('th', null),
+                          h('th', null, t('table.model')),
+                          h('th', null, t('suggest.match')),
+                          h('th', { className: 'num' }, t('costs.price')),
+                        )),
+                        h('tbody', null, state.suggestions.map((s) => h('tr', { key: keyOf(s) },
+                          h('td', null,
+                            h('input', {
+                              type: 'checkbox',
+                              'aria-label': s.model,
+                              checked: checked[keyOf(s)] === true,
+                              disabled: s.matchId === null,
+                              onClick: () => setChecked((prev) => ({ ...prev, [keyOf(s)]: !(prev[keyOf(s)] === true) })),
+                            })),
+                          h('td', null, `${s.provider ?? '?'} / ${s.model}`),
+                          h('td', { className: 'duc-small', title: s.matchId ?? undefined },
+                            s.matchId === null ? t('suggest.match.none') : `${s.matchId} (${matchTag(s)})`),
+                          h('td', { className: 'num duc-small' }, priceCell(s)),
+                        ))),
+                      ),
                     ),
+                    history !== null && history.count > 0
+                      ? h('div', { className: 'duc-small', style: { marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 } },
+                          h('div', { className: 'duc-muted' },
+                            interpolate(t('suggest.history.title'), {
+                              n: fmt.int(history.count),
+                              date: firstDate === null ? '–' : fmt.date(history.first),
+                            })),
+                          historyOption('today', t('suggest.history.today'), t('suggest.history.today.hint')),
+                          firstDate !== null
+                            ? historyOption(
+                                'earlier',
+                                interpolate(t('suggest.history.earlier'), { date: firstDate }),
+                                t('suggest.history.earlier.hint'),
+                              )
+                            : null,
+                          historyOption('retro', t('suggest.history.retro'), t('suggest.history.retro.hint')),
+                        )
+                      : null,
                   ),
             importError !== null
               ? h('div', { className: 'duc-error duc-small', style: { marginTop: 8 } }, `${t('state.error')} — ${importError}`)

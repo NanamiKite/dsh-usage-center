@@ -249,6 +249,7 @@ let importedBody = null;
 const suggestFixture = {
   source: 'openrouter',
   fetchedAt: 1794280000000,
+  historyBefore: { count: 120, first: 1794280000000 - 5 * 86_400_000 },
   suggestions: [
     { provider: 'glm', model: 'glm-5.3', requests: 500, tokens: 61_000_000, matchId: 'z-ai/glm-5.3', matchName: 'GLM 5.3', matchQuality: 'suffix', input: 0.5, output: 1.5, cacheRead: 0.05, cacheWrite: 0.7, checked: true },
     { provider: 'deepseek-account', model: 'deepseek-flash', requests: 90, tokens: 11_000_000, matchId: 'deepseek/deepseek-flash', matchName: 'DeepSeek Flash', matchQuality: 'exact', input: 0.27, output: 1.1, cacheRead: 0.007, cacheWrite: null, checked: true },
@@ -513,7 +514,7 @@ costsZeroPriced = true;
 await clickTab('总览');
 await clickTab('费用');
 assert.ok(!textOf(tree).includes('暂无数据'), 'usage present → not the bare empty state');
-assert.match(textOf(tree), /不追溯计价/, 'retroactive-pricing explanation rendered');
+assert.match(textOf(tree), /此前的请求不计价/, 'retroactive-pricing explanation rendered');
 assert.match(textOf(tree), /0%/, 'coverage card shows 0 of 600');
 assert.match(textOf(tree), /glm\/glm-5\.3/, 'usage table still lists models from usage facts');
 costsZeroPriced = false;
@@ -540,6 +541,16 @@ boxes[1].props.onClick(); // uncheck deepseek-flash
 dirty = true;
 await settle();
 tree = renderDashboard();
+// History choice: three options when pre-history exists; retro mode rides along.
+assert.match(textOf(tree), /早于今天的请求/, 'history facts surfaced in the dialog');
+const radios = collectNodes(tree).filter((n) => n.tag === 'input' && n.props.type === 'radio');
+assert.equal(radios.length, 3, 'three history choices offered');
+const retroRadio = radios.find((r) => r.props.value === 'retro');
+assert.ok(retroRadio !== undefined, 'retroactive option present');
+retroRadio.props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
 const importButton = findButtonWithText(tree, '导入所选');
 assert.ok(importButton !== undefined, 'import button rendered');
 assert.match(textOf(importButton), /\(1\)/, 'one row selected after unchecking');
@@ -551,6 +562,7 @@ assert.ok(importedBody !== null, 'import request posted');
 assert.equal(importedBody.models.length, 1, 'only the checked row posted');
 assert.equal(importedBody.models[0].model, 'glm-5.3');
 assert.equal(importedBody.models[0].cacheWrite, 0.7);
+assert.equal(importedBody.retroactive, true, 'the retro choice rides along with the import');
 assert.match(textOf(tree), /参考价已写入配置/, 'imported notice rendered');
 
 // Context diagnostics live INSIDE the requests page: the session picker
@@ -660,7 +672,7 @@ tree = renderDashboard();
 // Compaction diagnostics list: observed before/after drop, not "savings".
 assert.match(textOf(tree), /压缩诊断/, 'diagnostics section rendered');
 assert.match(textOf(tree), /压缩前后观测差额/, 'drop column labeled as observed difference');
-assert.match(textOf(tree), /不代表实际节省量/, 'not-savings disclaimer rendered');
+assert.match(textOf(tree), /非实际节省量/, 'not-savings disclaimer rendered');
 assert.match(textOf(tree), /\+3\.7万/, 'first drop 45,000 → 8,000');
 assert.match(textOf(tree), /18%/, 'first after/before ratio');
 assert.match(textOf(tree), /6500/, 'second drop 9,500 → 3,000');

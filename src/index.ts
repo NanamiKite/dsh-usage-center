@@ -360,10 +360,15 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
                     : null,
               });
             }
+            const todayStart = new Date();
+            todayStart.setHours(0, 0, 0, 0);
             send(res, 200, {
               source: 'openrouter',
               fetchedAt: Date.now(),
               suggestions: buildSuggestions(store.providerModelPairs(), orModels),
+              // Facts for the import dialog's history choice: requests that
+              // predate the default effective date (today's local midnight).
+              historyBefore: store.historyBefore(todayStart.getTime()),
             });
           } catch (error) {
             send(res, 502, { error: error instanceof Error ? error.message : String(error) });
@@ -372,7 +377,7 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
         const handleImport = async (req: NodeRequestLike, res: NodeResponseLike): Promise<void> => {
           try {
             const body = (await readJsonBody(req)) as {
-              effectiveFrom?: unknown; name?: unknown; models?: unknown;
+              effectiveFrom?: unknown; name?: unknown; models?: unknown; retroactive?: unknown;
             };
             const rawModels = Array.isArray(body.models) ? body.models : [];
             if (rawModels.length === 0 || rawModels.length > 500) {
@@ -432,9 +437,13 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
                 ? body.name
                 : `openrouter ${effectiveFrom}`;
             const newList = { name, currency: 'USD', effectiveFrom, models: rows };
+            // The opt-in retroactive mode can be enabled at import time (the
+            // dialog's third choice); it is written into the same config edit.
+            const retroactive = body.retroactive === true;
             await editor.edit(entry, (current) => ({
               ...current,
               prices: [...(Array.isArray(current.prices) ? current.prices : []), newList],
+              ...(retroactive ? { costRetroactive: true } : {}),
             }));
             ctx.logger.info(`dsh-usage-center: imported ${rows.length} reference price row(s) from openrouter`);
             send(res, 200, { ok: true, imported: rows.length, note: 'plugin reloads to apply the new price list' });

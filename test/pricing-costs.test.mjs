@@ -251,6 +251,21 @@ test('daily rate windows apply per row time in the cost cache', () => {
   }
 });
 
+test('historyBefore counts and finds the earliest pre-boundary request', () => {
+  const db = new UsageDatabase(':memory:');
+  try {
+    db.upsertRecord(record({ requestId: 's:1', seq: 1, timestamp: localTs(2026, 11, 1) }));
+    db.upsertRecord(record({ requestId: 's:2', seq: 2, timestamp: localTs(2026, 11, 10) }));
+    const h = db.historyBefore(localTs(2026, 11, 5));
+    assert.equal(h.count, 1, 'only the earlier record counts');
+    assert.equal(h.first, localTs(2026, 11, 1), 'earliest pre-boundary timestamp');
+    assert.equal(db.historyBefore(localTs(2026, 10, 1)).count, 0, 'nothing before the ledger begins');
+    assert.equal(db.historyBefore(localTs(2026, 10, 1)).first, null);
+  } finally {
+    db.close();
+  }
+});
+
 test('retroactive mode: pre-history priced at the first list when opted in, and flagged', () => {
   const db = new UsageDatabase(':memory:');
   try {

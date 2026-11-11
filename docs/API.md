@@ -17,8 +17,8 @@
 | `/context` | GET | `sessionId`（可选） | 各会话输入观测汇总（最近输入/增减/历史最大/观测数/压缩/窗口）；带 sessionId 时返回该会话逐请求观测序列与 `totalRequests`（该会话账本记录总数），每行在读时联表补全：`inputRaw`/`cacheRead`/`cacheWrite`/`outputTokens`/`durationMs`/`firstTokenLatencyMs`/`errorCode`（来自 `usage_records`）与 `costMicro`/`costCurrency`（来自 `cost_entries`，无价格表时为 null，不是 0） |
 | `/export` | GET | `what=records\|costs\|sessions` `format=csv\|json` 及明细筛选 | 文件下载（CSV 带 UTF-8 BOM） |
 | `/report/reconcile` | GET | — | 账本 vs 会话日志对账报告（全量重读，秒级） |
-| `/prices/suggest` | POST | — | 拉取 OpenRouter 公开价，返回匹配建议；不改任何状态 |
-| `/prices/import` | POST | `{ models: [...] }` | 把勾选行写入配置为新价格表，插件重载后生效 |
+| `/prices/suggest` | POST | — | 拉取 OpenRouter 公开价，返回匹配建议与 `historyBefore`（早于当天本地零点的请求数及最早时间，供导入时选择生效方式）；不改任何状态 |
+| `/prices/import` | POST | `{ models: [...], effectiveFrom?, retroactive? }` | 把勾选行写入配置为新价格表，插件重载后生效；`effectiveFrom` 可提前生效日，`retroactive: true` 同时开启回溯估算模式 |
 
 两个 POST 只在费用页"参考价…"按钮触发时使用（见[配置说明](CONFIGURATION.md)）。
 

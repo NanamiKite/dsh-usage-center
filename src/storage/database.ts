@@ -1942,6 +1942,15 @@ export class UsageDatabase {
     );
   }
 
+  /** Facts for the import choice: how many requests predate a boundary
+   *  (today's local midnight) and the earliest of them. */
+  historyBefore(boundary: number): { count: number; first: number | null } {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS c, MIN(timestamp) AS f FROM usage_records WHERE timestamp < ?')
+      .get(boundary) as { c: number; f: number | null };
+    return { count: Number(row.c), first: row.f === null ? null : Number(row.f) };
+  }
+
   contextObservations(sessionId: string): Array<{
     requestId: string; seq: number; timestamp: number;
     provider: string | null; model: string | null; kind: string;
