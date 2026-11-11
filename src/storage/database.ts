@@ -36,15 +36,18 @@ import {
   MISSING_CACHE_WRITE,
   MISSING_INPUT,
   MISSING_OUTPUT,
+  MISSING_RETRO,
   categoryMicro,
   normalizePriceList,
   resolvePrice,
+  windowMultiplier,
   type ModelPriceConfig,
+  type RateWindows,
 } from '../domain/pricing.js';
 
 /** 'dshu' -- dsh-usage-center's SQLite application id. */
 export const APPLICATION_ID = 0x6473_6875;
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 const CREATE_V1 = `
 CREATE TABLE IF NOT EXISTS usage_records (
@@ -194,6 +197,13 @@ CREATE INDEX IF NOT EXISTS idx_context_session ON context_samples (session_id, t
 const MIGRATE_V5 = 'ALTER TABLE sessions ADD COLUMN title TEXT;';
 
 /**
+ * v7: optional per-list daily rate windows (peak/off-peak discounts), stored
+ * as validated JSON on the price list row. `price_lists`/`cost_entries` are
+ * rebuildable caches, so a plain column add is the whole migration.
+ */
+const MIGRATE_V7 = 'ALTER TABLE price_lists ADD COLUMN windows TEXT;';
+
+/**
  * v6: per-request context observations — a DERIVED cache (same pattern as
  * daily_stats/cost_entries), rebuilt from usage_records × the window
  * declarations in context_samples. One row per request that has any valid
@@ -232,6 +242,25 @@ const RECORD_COLUMNS = `
 
 function now(): number {
   return Date.now();
+}
+
+/**
+ * Windows JSON stored on a price_lists row (`{ tz, entries }`) → validated
+ * value, or undefined. Corrupt or shapeless stored JSON degrades to
+ * base-rate pricing; a rebuild must never crash over a bad column.
+ */
+function parseStoredWindows(value: unknown): RateWindows | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  try {
+    const parsed = JSON.parse(value) as { tz?: unknown; entries?: unknown };
+    if (typeof parsed.tz !== 'string' || parsed.tz.length === 0
+      || !Array.isArray(parsed.entries)) {
+      return undefined;
+    }
+    return parsed as unknown as RateWindows;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Compare two ledger rows on the fact columns an update may change.
@@ -341,6 +370,14 @@ export class UsageDatabase {
     if (version < 6) {
       this.db.exec(CREATE_V6);
       version = 6;
+    }
+    if (version < 7) {
+      try {
+        this.db.exec(MIGRATE_V7);
+      } catch {
+        // column already present (fresh DBs re-running V3 with the column)
+      }
+      version = 7;
     }
     this.db.exec(`PRAGMA application_id = ${APPLICATION_ID};`);
     this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
@@ -1158,7 +1195,20 @@ export class UsageDatabase {
     const row = this.db
       .prepare('SELECT COUNT(*) AS c, COALESCE(MAX(id), 0) AS m FROM price_lists')
       .get() as { c: number; m: number };
-    return `${row.c}:${row.m}`;
+    // The retroactive-pricing mode changes what a rebuild WOULD produce for
+    // pre-history rows, so it belongs to the stamp: toggling it re-prices.
+    return `${row.c}:${row.m}:${this.getMeta('cost_retro') ?? '0'}`;
+  }
+
+  /** Opt-in: price requests older than the first list at that list's rates. */
+  setRetroactivePricing(enabled: boolean): void {
+    if (this.readOnly) return;
+    const value = enabled ? '1' : '0';
+    if ((this.getMeta('cost_retro') ?? '0') === value) return;
+    this.setMeta('cost_retro', value);
+    // The stamp change covers cross-restart; the pending flag makes the new
+    // mode take effect on the very next read in THIS process too.
+    this.pendingCostWrites = true;
   }
 
   /**
@@ -1170,8 +1220,8 @@ export class UsageDatabase {
     let synced = 0;
     let skipped = 0;
     const insert = this.db.prepare(
-      `INSERT OR IGNORE INTO price_lists (name, currency, effective_from, source_hash, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO price_lists (name, currency, effective_from, windows, source_hash, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     );
     const insertPrice = this.db.prepare(
       `INSERT OR IGNORE INTO prices (price_list_id, provider, model, input_per_m, output_per_m, cache_read_per_m, cache_write_per_m)
@@ -1185,6 +1235,7 @@ export class UsageDatabase {
       }
       const result = insert.run(
         normalized.name, normalized.currency, normalized.effectiveFrom,
+        normalized.windows === undefined ? null : JSON.stringify(normalized.windows),
         normalized.hash, now(),
       );
       if (result.changes > 0) {
@@ -1209,10 +1260,11 @@ export class UsageDatabase {
   /** Configured price lists with their model counts (read-only view). */
   listPriceLists(): Array<{
     id: number; name: string; currency: string; effectiveFrom: number; models: number;
+    windows: RateWindows | null;
   }> {
     return (this.db
       .prepare(
-        `SELECT l.id, l.name, l.currency, l.effective_from,
+        `SELECT l.id, l.name, l.currency, l.effective_from, l.windows,
                 (SELECT COUNT(*) FROM prices p WHERE p.price_list_id = l.id) AS models
           FROM price_lists l ORDER BY l.effective_from ASC, l.id ASC`,
       )
@@ -1222,7 +1274,13 @@ export class UsageDatabase {
       currency: String(row.currency),
       effectiveFrom: Number(row.effective_from),
       models: Number(row.models),
+      windows: parseStoredWindows(row.windows) ?? null,
     }));
+  }
+
+  /** Whether the opt-in retroactive pricing mode is active. */
+  retroactivePricing(): boolean {
+    return this.getMeta('cost_retro') === '1';
   }
 
   costsDirty(): boolean {
@@ -1236,21 +1294,26 @@ export class UsageDatabase {
   rebuildCosts(): number {
     const listsRaw = this.db
       .prepare(
-        `SELECT l.id, l.currency, l.effective_from, p.provider, p.model,
+        `SELECT l.id, l.currency, l.effective_from, l.windows, p.provider, p.model,
                 p.input_per_m, p.output_per_m, p.cache_read_per_m, p.cache_write_per_m
           FROM price_lists l JOIN prices p ON p.price_list_id = l.id
           ORDER BY l.effective_from ASC, l.id ASC`,
       )
       .all() as Array<Record<string, unknown>>;
-    const lists = new Map<number, { effectiveFrom: number; currency: string; models: ModelPriceConfig[] }>();
+    const lists = new Map<
+      number,
+      { effectiveFrom: number; currency: string; models: ModelPriceConfig[]; windows?: RateWindows }
+    >();
     for (const row of listsRaw) {
       const id = Number(row.id);
       let list = lists.get(id);
       if (list === undefined) {
+        const windows = parseStoredWindows(row.windows);
         list = {
           effectiveFrom: Number(row.effective_from),
           currency: String(row.currency),
           models: [],
+          ...(windows !== undefined ? { windows } : {}),
         };
         lists.set(id, list);
       }
@@ -1270,6 +1333,12 @@ export class UsageDatabase {
       list.models.push(entry);
     }
     const priceLists = [...lists.entries()].map(([id, list]) => ({ id, ...list }));
+    // Ordered by effective_from ASC above, so [0] is the earliest list. The
+    // opt-in retroactive mode prices pre-history rows with THAT list — the
+    // temporally nearest price basis — and flags them (MISSING_RETRO) so the
+    // UI can label the approximation instead of hiding it.
+    const retroActive = this.getMeta('cost_retro') === '1';
+    const earliestList = priceLists[0];
     const records = this.db
       .prepare(
         'SELECT request_id, provider, model, timestamp, input_tokens, output_tokens, ' +
@@ -1291,7 +1360,16 @@ export class UsageDatabase {
       for (const record of records) {
         const provider = typeof record.provider === 'string' ? record.provider : null;
         const model = typeof record.model === 'string' ? record.model : null;
-        const resolved = resolvePrice(priceLists, Number(record.timestamp), provider, model);
+        const timestamp = Number(record.timestamp);
+        let resolved = resolvePrice(priceLists, timestamp, provider, model);
+        let retroList: (typeof priceLists)[number] | undefined;
+        if (resolved === null && retroActive && earliestList !== undefined) {
+          const candidate = resolvePrice(priceLists, earliestList.effectiveFrom, provider, model);
+          if (candidate !== null) {
+            resolved = candidate;
+            retroList = earliestList;
+          }
+        }
         if (resolved === null) continue;
         const tokens = {
           input: typeof record.input_tokens === 'number' ? record.input_tokens : null,
@@ -1299,15 +1377,19 @@ export class UsageDatabase {
           cacheRead: typeof record.cache_read_tokens === 'number' ? record.cache_read_tokens : null,
           cacheWrite: typeof record.cache_write_tokens === 'number' ? record.cache_write_tokens : null,
         };
-        const inputMicro = categoryMicro(tokens.input, resolved.entry.input);
-        const outputMicro = categoryMicro(tokens.output, resolved.entry.output);
-        const cacheReadMicro = categoryMicro(tokens.cacheRead, resolved.entry.cacheRead);
-        const cacheWriteMicro = categoryMicro(tokens.cacheWrite, resolved.entry.cacheWrite);
+        const multiplier = windowMultiplier(
+          (retroList ?? resolved.list).windows, timestamp,
+        );
+        const inputMicro = Math.round(categoryMicro(tokens.input, resolved.entry.input) * multiplier);
+        const outputMicro = Math.round(categoryMicro(tokens.output, resolved.entry.output) * multiplier);
+        const cacheReadMicro = Math.round(categoryMicro(tokens.cacheRead, resolved.entry.cacheRead) * multiplier);
+        const cacheWriteMicro = Math.round(categoryMicro(tokens.cacheWrite, resolved.entry.cacheWrite) * multiplier);
         let missing = 0;
         if ((tokens.input ?? 0) > 0 && resolved.entry.input === undefined) missing |= MISSING_INPUT;
         if ((tokens.output ?? 0) > 0 && resolved.entry.output === undefined) missing |= MISSING_OUTPUT;
         if ((tokens.cacheRead ?? 0) > 0 && resolved.entry.cacheRead === undefined) missing |= MISSING_CACHE_READ;
         if ((tokens.cacheWrite ?? 0) > 0 && resolved.entry.cacheWrite === undefined) missing |= MISSING_CACHE_WRITE;
+        if (retroList !== undefined) missing |= MISSING_RETRO;
         insert.run(
           String(record.request_id), resolved.list.id, resolved.list.currency,
           inputMicro, outputMicro, cacheReadMicro, cacheWriteMicro,
@@ -1350,7 +1432,7 @@ export class UsageDatabase {
     byCurrency: CostByCurrency[];
     byModel: CostByModelRow[];
     byDay: CostByDayRow[];
-    coverage: { totalRequests: number; pricedRequests: number };
+    coverage: { totalRequests: number; pricedRequests: number; retroPriced: number };
   } {
     this.ensureCostsFresh();
     const { clause, params } = UsageDatabase.WHERE(filters);
@@ -1448,6 +1530,15 @@ export class UsageDatabase {
       coverage: {
         totalRequests,
         pricedRequests: currencyRows.reduce((acc, row) => acc + Number(row.requests ?? 0), 0),
+        retroPriced: Number(
+          (this.db
+            .prepare(
+              `SELECT COUNT(*) AS c FROM cost_entries c
+                 JOIN usage_records r ON r.request_id = c.request_id${clause}
+                 ${clause.length > 0 ? 'AND' : 'WHERE'} (c.missing_mask & ${MISSING_RETRO}) != 0`,
+            )
+            .get(...params) as { c: number }).c,
+        ),
       },
     };
   }

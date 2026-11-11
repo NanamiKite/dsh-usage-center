@@ -159,10 +159,14 @@ export class QueryService {
   // -------------------------------------------------------------------------
   // Estimated costs and exports.
 
-  /** Configured price lists (read-only view of the synced config). */
-  prices(): { configured: boolean; lists: ReturnType<UsageDatabase['listPriceLists']> } {
+  /** Configured price lists (read-only view) + the retroactive-mode state. */
+  prices(): {
+    configured: boolean;
+    retroactive: boolean;
+    lists: ReturnType<UsageDatabase['listPriceLists']>;
+  } {
     const lists = this.store.listPriceLists();
-    return { configured: lists.length > 0, lists };
+    return { configured: lists.length > 0, retroactive: this.store.retroactivePricing(), lists };
   }
 
   // -------------------------------------------------------------------------
@@ -238,14 +242,22 @@ export class QueryService {
   /** Aggregated estimated costs, or `configured: false` with no prices. */
   costs(filters: { from?: number; to?: number } = {}): {
     configured: boolean;
+    /** Newest price list's effective date — explains "configured but nothing priced yet". */
+    effectiveFrom?: number | null;
     byCurrency?: CostByCurrency[];
     byModel?: ReturnType<UsageDatabase['costAggregates']>['byModel'];
     byDay?: ReturnType<UsageDatabase['costAggregates']>['byDay'];
-    coverage?: { totalRequests: number; pricedRequests: number };
+    coverage?: { totalRequests: number; pricedRequests: number; retroPriced: number };
   } {
-    if (this.store.listPriceLists().length === 0) return { configured: false };
+    const lists = this.store.listPriceLists();
+    if (lists.length === 0) return { configured: false };
     const aggregates = this.store.costAggregates(filters);
-    return { configured: true, ...aggregates };
+    const newest = lists[lists.length - 1];
+    return {
+      configured: true,
+      effectiveFrom: newest === undefined ? null : newest.effectiveFrom,
+      ...aggregates,
+    };
   }
 
   /** Row shaping shared by the CSV and JSON exports. */

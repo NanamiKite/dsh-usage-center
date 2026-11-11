@@ -115,6 +115,8 @@ window.__ModuleLoader__.load({
       'status.error': '失败',
       'costs.basis': '模型用量',
       'costs.pending': '未配置价格 — 点「参考价…」导入后可估算',
+      'costs.notCovered': '价格表自 {date} 起生效：此前的请求不追溯计价（没有公开历史价，不猜）。若价格在更早时段确实相同，把配置里该表的 effectiveFrom 改早即可覆盖那段历史',
+      'costs.retroNote': '含 {n} 条回溯估算：早于首张价格表的请求按首张表单价估算（近似口径，非精确历史价）',
       'costs.price': '单价 /1M',
       'costs.suggest': '参考价…',
       'costs.imported': '参考价已写入配置，重启 DSH 后生效',
@@ -267,6 +269,8 @@ window.__ModuleLoader__.load({
       'status.error': 'Error',
       'costs.basis': 'Model usage',
       'costs.pending': 'No prices configured — click "Reference prices…" to import',
+      'costs.notCovered': 'The price list applies from {date}: earlier requests are not priced retroactively (no public price history, so nothing is guessed). If the same price genuinely applied earlier, set an earlier effectiveFrom in the config',
+      'costs.retroNote': 'Includes {n} retroactively priced requests: calls before the first price list are estimated at that list’s rates (an approximation, not exact historical prices)',
       'costs.price': 'Price /1M',
       'costs.suggest': 'Reference prices…',
       'costs.imported': 'Reference prices written to config; applies after DSH restarts',
@@ -1284,9 +1288,13 @@ select.duc-input{min-width:100px}
       const costs = data?.costs;
       const basisRows = data?.basis?.rows ?? [];
       const configured = costs !== undefined && costs.configured;
-      // One table in both states: usage facts, then the effective price and
-      // the estimated cost it implies (both "–" until prices are configured).
-      const rows = configured
+      // Prices configured but nothing covered yet — the imported reference
+      // list starts TODAY and earlier requests are deliberately not priced
+      // retroactively. Fall back to usage facts so the page explains the
+      // situation instead of reading as "no data".
+      const noPriced = configured === true
+        && (costs.byModel === undefined || costs.byModel.length === 0);
+      const rows = configured === true && !noPriced
         ? costs.byModel
         : basisRows.map((row) => ({ ...row, currency: null, totalMicro: null, price: null }));
       // Each price category gets its own column — a joined "a · b · c" string
@@ -1297,6 +1305,16 @@ select.duc-input{min-width:100px}
         return value === undefined || value === null ? '–' : fmt.money(value * 1e6, 'USD');
       };
       return h(StateView, { loading, error, empty: !loading && rows.length === 0, onRetry: refresh, t },
+        noPriced
+          ? h('div', { className: 'duc-small duc-muted', style: { marginBottom: 8 } },
+              interpolate(t('costs.notCovered'), {
+                date: typeof costs.effectiveFrom === 'number' ? fmt.date(costs.effectiveFrom) : '–',
+              }))
+          : null,
+        configured === true && costs.coverage.retroPriced > 0
+          ? h('div', { className: 'duc-small duc-muted', style: { marginBottom: 8 } },
+              interpolate(t('costs.retroNote'), { n: fmt.int(costs.coverage.retroPriced) }))
+          : null,
         configured
           ? h('div', { className: 'duc-grid' },
               costs.byCurrency.map((c) => h(StatCard, {
@@ -1322,7 +1340,11 @@ select.duc-input{min-width:100px}
             h('h3', { className: 'duc-section-title' }, t('costs.basis')),
             h('span', { style: { display: 'inline-flex', gap: '8px', alignItems: 'baseline' } },
               h('span', { className: 'duc-small duc-muted' },
-                configured ? `≈ ${t('costs.estimate')} · ${costs.byCurrency.map((c) => c.currency).join(' · ')}` : t('costs.pending')),
+                configured
+                  ? (costs.byCurrency.length > 0
+                      ? `≈ ${t('costs.estimate')} · ${costs.byCurrency.map((c) => c.currency).join(' · ')}`
+                      : `≈ ${t('costs.estimate')}`)
+                  : t('costs.pending')),
               h('button', {
                 type: 'button', className: 'duc-iconbtn duc-small', onClick: () => setSuggestOpen(true),
               }, t('costs.suggest')),

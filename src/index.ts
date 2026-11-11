@@ -29,10 +29,17 @@ export interface UsageCenterConfig {
   apiPath?: string;
   /**
    * Estimated-cost price lists. Each list: `{ name?, currency, effectiveFrom,
-   * models: [{ provider?, model, input?, output?, cacheRead?, cacheWrite? }] }`
+   * windows?, models: [{ provider?, model, input?, output?, cacheRead?, cacheWrite? }] }`
    * with per-1M-token prices. Append-only and deduplicated by content hash.
    */
   prices?: unknown[];
+  /**
+   * Opt-in approximation: price requests older than the first price list at
+   * that list's rates ("current list price, applied backwards"). Retro rows
+   * are flagged and labeled in the UI; default false keeps unpriced history
+   * unpriced (never guessed).
+   */
+  costRetroactive?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +154,7 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
     const query = new QueryService(store);
 
     // ----- price lists from config (append-only, hash-deduplicated) -------
+    store.setRetroactivePricing(config.costRetroactive === true);
     if (config.prices !== undefined) {
       try {
         const sync = store.syncPriceLists(config.prices);

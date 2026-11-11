@@ -41,7 +41,7 @@ SQLite（`node:sqlite`，无原生依赖），默认 `$DSH_HOME/dsh-usage-center
 | `cost_entries` | 派生费用缓存；主键 `request_id`，每请求一行，四类 token 各一列整数微货币单位 + `missing_mask` |
 | `meta` | schema 版本与聚合戳 |
 
-防护：`PRAGMA application_id`（`'dshu'`）拒绝打开无关数据库；`user_version` 驱动步进迁移（当前 v6：v4 窗口声明表，v5 会话标题，v6 观测派生表），遇到更新的 schema 版本拒绝打开。
+防护：`PRAGMA application_id`（`'dshu'`）拒绝打开无关数据库；`user_version` 驱动步进迁移（当前 v7：v4 窗口声明表，v5 会话标题，v6 观测派生表，v7 价格表峰谷窗口列），遇到更新的 schema 版本拒绝打开。
 
 ### 派生缓存的维护（daily_stats / cost_entries 共用模式）
 
@@ -66,7 +66,9 @@ QueryService 是唯一统计出口，HTTP API 与 Web 面板都不自行计算�
 价格来自插件配置（`prices` 数组），启动时同步进 `price_lists`/`prices` 表：追加式、按内容哈希去重，同一配置重复启动无副作用。
 
 - 生效语义与表内匹配见[配置说明](CONFIGURATION.md)。
-- 算术：`micro = round(tokens × 每百万单价)`，整数微货币单位（1e-6）累加，聚合无浮点漂移。
+- **峰谷窗口**：表可声明每日重复的 `windows`（`from`/`to` HH:MM，可跨零点，`multiplier` 乘全部单价）；重建时按每条记录时间在**表存储的时区**（显式 `tz`，缺省为配置机器时区、解析后随表入库）选窗口——同一账本在任何机器重算结果一致；窗口外按原价；解析期校验重叠与时区合法性并整表拒绝（歧义不接受）。
+- **现价回溯**（`costRetroactive`，默认关）：早于首张表的记录按首张表单价计价并打 `MISSING_RETRO`（bit 16）标记，覆盖率单列 `retroPriced`，界面标注"回溯估算（近似口径）"。锚点是**首张表生效时刻的正常解析**：同 `effectiveFrom` 先入库者优先，首张表匹配不到该模型或缺少某类单价时不跨表拼凑；开关进入价格戳：切换即触发重建。
+- 算术：`micro = round(tokens × 每百万单价)`，窗口乘数在类目取整后相乘再取整，整数微货币单位（1e-6）累加，聚合无浮点漂移。
 - 某类 token 有量而无价 → 该类不计价并置 missing 标记；覆盖率 = 已计价请求 / 总请求。
 - 费用视图在聚合中附上最新生效价格表的单价（含通配 provider 条目），表格呈现 输入/输出/缓存读三列单价 × 用量 → 费用。
 - 参考价导入是配置的便捷入口而非独立价格来源：匹配、确认、写入的完整流程见[配置说明](CONFIGURATION.md)；匹配器为 `domain/openrouter.ts` 纯函数（完整 id 相等 > 精确命名空间 > 账号限定名取首段 > 尾段一致 > 近似包含；同排名取更短 id）。

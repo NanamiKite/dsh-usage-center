@@ -11,7 +11,7 @@ node scripts/smoke-client.mjs       # 客户端注册形状 + 源码级配色门
 node scripts/render-client.mjs      # 客户端组件树渲染驱动（改 client/ 后必跑）
 ```
 
-门禁约定：`client/` 的任何改动都要过 smoke + render drive；宿主侧（`src/`）改动过 `pnpm check` + verify-vs-logs。渲染驱动用带钩子语义的迷你 React 渲染器驱动真实组件（数据态、页签切换、翻页、台账展开、价格导入全流程），驱动覆盖不了的（真实配色、主题跟随）明确标注"需实机确认"。
+门禁约定：`client/` 的任何改动都要过 smoke + render drive；宿主侧（`src/`）改动过 `pnpm check` + verify-vs-logs。渲染驱动用带钩子语义的迷你 React 渲染器驱动真实组件（数据态、页签切换、翻页、台账展开、价格导入全流程），驱动覆盖不了的（真实配色、主题跟随）明确标注"需实机确认"。verify-vs-logs 在**活跃会话内**运行时，当前会话可能恒差 1 条在途记录（实时采集先写账本、日志后落盘）——token 各字段全等即无数据分歧，非门禁失败；只有 token 不等或重放不幂等才是真问题。
 
 文件约定：源码一律 UTF-8 + LF。**不要用 PowerShell 管道改写含中文的源文件**——`Get-Content`/`Set-Content` 在本机会按系统代码页（GBK）解码 UTF-8 再以 ANSI 写回，造成不可逆乱码（发生过一次，靠 git 基线 + 重放编辑恢复）。改中文文本用编辑工具或 Node 脚本（显式 `utf8`）。
 

@@ -58,6 +58,7 @@ const record = (n) => ({
 });
 
 let costsConfigured = false;
+let costsZeroPriced = false;
 
 function payloadFor(path) {
   if (path.startsWith('/summary')) {
@@ -69,6 +70,14 @@ function payloadFor(path) {
     };
   }
   if (path.startsWith('/costs')) {
+    if (costsZeroPriced) {
+      // Configured, but the list starts today: history unpriced, nothing guessed.
+      return {
+        configured: true, effectiveFrom: 1794280000000,
+        byCurrency: [], byModel: [], byDay: [],
+        coverage: { totalRequests: 600, pricedRequests: 0, retroPriced: 0 },
+      };
+    }
     if (!costsConfigured) return { configured: false };
     return {
       configured: true,
@@ -79,7 +88,7 @@ function payloadFor(path) {
         price: { input: 1.1, output: 4.4, cacheRead: 0.11 },
       }],
       byDay: [{ day: '2026-11-10', currency: 'USD', totalMicro: 500_000 }],
-      coverage: { totalRequests: 600, pricedRequests: 590 },
+      coverage: { totalRequests: 600, pricedRequests: 590, retroPriced: 12 },
     };
   }
   if (path.startsWith('/context')) {
@@ -475,6 +484,18 @@ await clickTab('总览');
 await clickTab('费用');
 assert.match(textOf(tree), /USD/, 'configured cost view rendered');
 assert.match(textOf(tree), /1\.10/, 'configured price cell rendered');
+assert.match(textOf(tree), /回溯估算/, 'retro-pricing note rendered when retro rows exist');
+
+// Configured but nothing covered yet (the list starts today, history is not
+// priced retroactively): the page must explain, not read as "no data".
+costsZeroPriced = true;
+await clickTab('总览');
+await clickTab('费用');
+assert.ok(!textOf(tree).includes('暂无数据'), 'usage present → not the bare empty state');
+assert.match(textOf(tree), /不追溯计价/, 'retroactive-pricing explanation rendered');
+assert.match(textOf(tree), /0%/, 'coverage card shows 0 of 600');
+assert.match(textOf(tree), /glm\/glm-5\.3/, 'usage table still lists models from usage facts');
+costsZeroPriced = false;
 
 // Reference-price import: explicit button, per-row confirmation, POST only
 // the checked rows, notice after import.

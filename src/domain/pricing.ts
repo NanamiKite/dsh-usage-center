@@ -38,7 +38,37 @@ export interface PriceListConfig {
   currency: string;
   /** Local `YYYY-MM-DD` or epoch ms. */
   effectiveFrom: string | number;
+  /**
+   * IANA zone the `windows` wall-clock times are read in. Optional; when
+   * omitted the configuring machine's zone is resolved ONCE and stored with
+   * the list, so rebuilds on any machine reproduce the same costs. Write it
+   * explicitly for stable cross-machine config hashes.
+   */
+  tz?: string;
+  /**
+   * Optional daily repeating rate windows (`{ from: 'HH:MM', to: 'HH:MM',
+   * multiplier }`, may wrap midnight). A row's own timestamp picks its
+   * window; time outside every window prices at the base rate.
+   */
+  windows?: RateWindowConfig[];
   models: ModelPriceConfig[];
+}
+
+/** One daily repeating window, e.g. an off-peak discount. */
+export interface RateWindowConfig {
+  /** Wall-clock `HH:MM` (in the list's zone) where the window starts. */
+  from: string;
+  /** Wall-clock `HH:MM` where it ends (exclusive; may be < from). */
+  to: string;
+  /** Multiplier applied to every priced category inside the window. */
+  multiplier: number;
+}
+
+/** Validated windows plus the zone they are read in — stored as one value. */
+export interface RateWindows {
+  /** IANA zone the HH:MM boundaries are wall-clock in. */
+  tz: string;
+  entries: RateWindowConfig[];
 }
 
 export interface NormalizedPriceList {
@@ -46,6 +76,8 @@ export interface NormalizedPriceList {
   currency: string;
   effectiveFrom: number;
   models: ModelPriceConfig[];
+  /** Parsed and validated windows (with resolved zone), when configured. */
+  windows?: RateWindows;
   /** Stable content hash for idempotent config sync. */
   hash: string;
 }
@@ -55,6 +87,8 @@ export const MISSING_INPUT = 1;
 export const MISSING_OUTPUT = 2;
 export const MISSING_CACHE_READ = 4;
 export const MISSING_CACHE_WRITE = 8;
+/** Priced retroactively (before the first list) under the opt-in mode. */
+export const MISSING_RETRO = 16;
 
 /**
  * Parse and validate one configured list. Returns null for a malformed list
@@ -102,19 +136,137 @@ export function normalizePriceList(input: unknown): NormalizedPriceList | null {
   const name = typeof raw.name === 'string' && raw.name.trim().length > 0
     ? raw.name.trim()
     : `${currency} @ ${new Date(effectiveFrom).toISOString()}`;
-  return { name, currency, effectiveFrom, models, hash: hashPriceList({ name, currency, effectiveFrom, models }) };
+  const windows = normalizeWindows(raw.windows, raw.tz);
+  if (windows === null) return null; // malformed windows (or zone) reject the list
+  const list: Omit<NormalizedPriceList, 'hash'> = { name, currency, effectiveFrom, models };
+  if (windows !== undefined) list.windows = windows;
+  return { ...list, hash: hashPriceList(list) };
+}
+
+const HH_MM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+function validZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Parse and validate the optional daily windows. Rules: `HH:MM`, `0 <
+ * multiplier <= 10`, wrap past midnight allowed, OVERLAP rejected (an
+ * ambiguous row would otherwise pick a window by list order). The zone is
+ * `tz` when given (must be valid IANA) and otherwise the configuring
+ * machine's zone — resolved ONCE here so the stored value is reproducible
+ * on machines in other zones. Returns undefined when no windows are
+ * configured, null for any violation — the whole list is skipped rather
+ * than guessed.
+ */
+export function normalizeWindows(input: unknown, tzInput?: unknown): RateWindows | undefined | null {
+  if (input === undefined || input === null) return undefined;
+  if (!Array.isArray(input) || input.length === 0) return null;
+  let tz: string;
+  if (tzInput === undefined || tzInput === null) {
+    tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } else if (typeof tzInput === 'string' && tzInput.trim().length > 0 && validZone(tzInput.trim())) {
+    tz = tzInput.trim();
+  } else {
+    return null; // an invalid zone is a config error, never guessed
+  }
+  const entries: RateWindowConfig[] = [];
+  const covered = new Array<boolean>(24 * 60).fill(false);
+  const cover = (from: number, to: number): boolean => {
+    for (let m = from; m !== to; m = (m + 1) % 1440) {
+      if (covered[m]) return false;
+      covered[m] = true;
+    }
+    return true;
+  };
+  for (const entry of input) {
+    if (typeof entry !== 'object' || entry === null) return null;
+    const e = entry as Record<string, unknown>;
+    const fromMatch = typeof e.from === 'string' ? HH_MM.exec(e.from.trim()) : null;
+    const toMatch = typeof e.to === 'string' ? HH_MM.exec(e.to.trim()) : null;
+    if (fromMatch === null || toMatch === null) return null;
+    if (typeof e.multiplier !== 'number' || !Number.isFinite(e.multiplier)
+        || e.multiplier <= 0 || e.multiplier > 10) {
+      return null;
+    }
+    const fromMin = Number(fromMatch[1]) * 60 + Number(fromMatch[2]);
+    const toMin = Number(toMatch[1]) * 60 + Number(toMatch[2]);
+    if (fromMin === toMin) return null; // zero-length window
+    if (!cover(fromMin, toMin)) return null; // overlap
+    entries.push({ from: fromMatch[0], to: toMatch[0], multiplier: e.multiplier });
+  }
+  return { tz, entries };
+}
+
+const zoneFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** Wall-clock (hour, minute) of `timestamp` in `tz`, via cached formatters. */
+function hourMinuteOf(tz: string, timestamp: number): { hour: number; minute: number } {
+  let formatter = zoneFormatters.get(tz);
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hour: 'numeric', minute: 'numeric', hourCycle: 'h23',
+    });
+    zoneFormatters.set(tz, formatter);
+  }
+  const parts = formatter.formatToParts(new Date(timestamp));
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
+  return { hour, minute };
+}
+
+/**
+ * The window multiplier for one row: the wall-clock minute of its timestamp
+ * IN THE LIST'S STORED ZONE (not the reading process's zone), against the
+ * daily windows (wrap-aware). Outside every window → 1 (base rate).
+ */
+export function windowMultiplier(windows: RateWindows | undefined, timestamp: number): number {
+  if (windows === undefined || windows.entries.length === 0) return 1;
+  const { hour, minute } = hourMinuteOf(windows.tz, timestamp);
+  const clock = hour * 60 + minute;
+  for (const w of windows.entries) {
+    const from = HH_MM.exec(w.from);
+    const to = HH_MM.exec(w.to);
+    if (from === null || to === null) continue;
+    const fromMin = Number(from[1]) * 60 + Number(from[2]);
+    const toMin = Number(to[1]) * 60 + Number(to[2]);
+    const inside = fromMin <= toMin
+      ? clock >= fromMin && clock < toMin
+      : clock >= fromMin || clock < toMin; // wraps midnight
+    if (inside) return w.multiplier;
+  }
+  return 1;
 }
 
 /** Local `YYYY-MM-DD` (midnight) or epoch ms → epoch ms; null when invalid. */
 export function normalizeEffectiveFrom(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    // Outside the ECMAScript time range, Date methods throw — reject instead.
+    if (Math.abs(value) > 8.64e15) return null;
+    return Math.trunc(value);
+  }
   if (typeof value === 'string') {
     const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
     if (match !== null) {
-      const date = new Date(
-        Number(match[1]), Number(match[2]) - 1, Number(match[3]), 0, 0, 0, 0,
-      );
-      return Number.isNaN(date.getTime()) ? null : date.getTime();
+      const year = Number(match[1]);
+      const month = Number(match[2]);
+      const day = Number(match[3]);
+      const date = new Date(year, month - 1, day, 0, 0, 0, 0);
+      // Read back: JS Date silently ROLLS overflow (2026-02-30 → March,
+      // 2026-13-01 → next January). A rolled date is a config error, not a
+      // silently shifted effective day.
+      if (Number.isNaN(date.getTime())
+        || date.getFullYear() !== year
+        || date.getMonth() !== month - 1
+        || date.getDate() !== day) {
+        return null;
+      }
+      return date.getTime();
     }
   }
   return null;
@@ -141,7 +293,9 @@ function specificity(entry: ModelPriceConfig, provider: string | null, model: st
   if (!providerOk || !modelOk) return -1;
   const providerRank = entry.provider === undefined ? 0 : 1;
   const modelRank = entry.model === '*' ? 0 : 1;
-  return providerRank * 2 + modelRank;
+  // Model exactness outranks provider exactness (the documented tier order):
+  // wildcard-provider + exact model beats exact-provider + wildcard model.
+  return modelRank * 2 + providerRank;
 }
 
 /**

@@ -12,8 +12,8 @@
 | `/trend` | GET | `days`（1–366）`by=all\|provider\|model` | 逐日聚合；分组模式返回按 key 的序列（Top 6 + 其他） |
 | `/breakdown` | GET | `by=model\|provider\|kind` | 分组统计 |
 | `/sessions` | GET | `limit` `offset` | 逐会话台账汇总（上限 200/页） |
-| `/prices` | GET | — | 已同步的价格表 |
-| `/costs` | GET | `from` `to` `sessionId` `provider` `model` `kind` | 估算费用（按币种/模型/天 + 覆盖率） |
+| `/prices` | GET | — | 已同步的价格表（含 `windows` 窗口配置）与回溯开关状态 `retroactive` |
+| `/costs` | GET | `from` `to` `sessionId` `provider` `model` `kind` | 估算费用（按币种/模型/天 + 覆盖率 + 最新价格表生效时间 `effectiveFrom`，用于解释"已配置但尚无覆盖"） |
 | `/context` | GET | `sessionId`（可选） | 各会话输入观测汇总（最近输入/增减/历史最大/观测数/压缩/窗口）；带 sessionId 时返回逐请求观测序列，每行在读时联表补全：`inputRaw`/`cacheRead`/`cacheWrite`/`outputTokens`/`durationMs`/`firstTokenLatencyMs`/`errorCode`（来自 `usage_records`）与 `costMicro`/`costCurrency`（来自 `cost_entries`，无价格表时为 null，不是 0） |
 | `/export` | GET | `what=records\|costs\|sessions` `format=csv\|json` 及明细筛选 | 文件下载（CSV 带 UTF-8 BOM） |
 | `/report/reconcile` | GET | — | 账本 vs 会话日志对账报告（全量重读，秒级） |
