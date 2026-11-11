@@ -1932,6 +1932,16 @@ export class UsageDatabase {
    * `usage_records` primary key, so the detail drill-down needs no second
    * fetch. Cost fields stay null when no price list covers the request.
    */
+  /** Indexed record count of one session — records without observable usage
+   *  are not observations, so the panel summary cannot derive it alone. */
+  sessionRecordCount(sessionId: string): number {
+    return Number(
+      (this.db
+        .prepare('SELECT COUNT(*) AS c FROM usage_records WHERE session_id = ?')
+        .get(sessionId) as { c: number }).c,
+    );
+  }
+
   contextObservations(sessionId: string): Array<{
     requestId: string; seq: number; timestamp: number;
     provider: string | null; model: string | null; kind: string;

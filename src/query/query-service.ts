@@ -176,10 +176,16 @@ export class QueryService {
   context(sessionId?: string): {
     sessions?: ReturnType<UsageDatabase['contextOverview']>;
     sessionId?: string;
+    /** Total ledger records of the session (observations + usage-less records). */
+    totalRequests?: number;
     observations?: ReturnType<UsageDatabase['contextObservations']>;
   } {
     if (sessionId !== undefined && sessionId.length > 0) {
-      return { sessionId, observations: this.store.contextObservations(sessionId) };
+      return {
+        sessionId,
+        totalRequests: this.store.sessionRecordCount(sessionId),
+        observations: this.store.contextObservations(sessionId),
+      };
     }
     return { sessions: this.store.contextOverview() };
   }

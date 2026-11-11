@@ -37,7 +37,6 @@ window.__ModuleLoader__.load({
       'tabs.requests': '请求',
       'tabs.ledger': '台账',
       'tabs.costs': '费用',
-      'tabs.context': '上下文',
       'range.label': '趋势范围',
       'range.7': '7 天',
       'range.30': '30 天',
@@ -99,7 +98,8 @@ window.__ModuleLoader__.load({
       'filter.provider': '提供商…',
       'filter.model': '模型…',
       'filter.kind': '类型…',
-      'filter.session': '会话 ID…',
+      'filter.allSessions': '全部会话',
+      'filter.searchSession': '搜索会话（名称 / ID / 路径）…',
       'filter.clear': '清除筛选',
       'page.prev': '上一页',
       'page.next': '下一页',
@@ -135,7 +135,6 @@ window.__ModuleLoader__.load({
       'context.pending': '上下文监控尚未提供',
       'context.window': '窗口',
       'context.compactions': '压缩',
-      'context.back': '返回',
       'context.series': '上下文走势',
       'context.latest': '最新会话',
       'context.selected': '所选会话',
@@ -191,7 +190,6 @@ window.__ModuleLoader__.load({
       'tabs.requests': 'Requests',
       'tabs.ledger': 'Ledger',
       'tabs.costs': 'Costs',
-      'tabs.context': 'Context',
       'range.label': 'Trend range',
       'range.7': '7 days',
       'range.30': '30 days',
@@ -253,7 +251,8 @@ window.__ModuleLoader__.load({
       'filter.provider': 'Provider…',
       'filter.model': 'Model…',
       'filter.kind': 'Kind…',
-      'filter.session': 'Session id…',
+      'filter.allSessions': 'All sessions',
+      'filter.searchSession': 'Search sessions (name / id / path)…',
       'filter.clear': 'Clear filters',
       'page.prev': 'Previous',
       'page.next': 'Next',
@@ -289,7 +288,6 @@ window.__ModuleLoader__.load({
       'context.pending': 'Context monitor is not available yet',
       'context.window': 'Window',
       'context.compactions': 'Compactions',
-      'context.back': 'Back',
       'context.series': 'Context series',
       'context.latest': 'Latest session',
       'context.selected': 'Selected session',
@@ -648,6 +646,18 @@ select.duc-input{min-width:100px}
 .duc-heatlegend{display:flex;align-items:center;gap:4px;font-size:12px;color:${colors.labelSecondary};margin-top:8px}
 .duc-expander{border:none;background:transparent;color:${colors.labelSecondary};cursor:pointer;padding:0 4px;font:inherit;width:14px;line-height:1}
 .duc-expander:hover{color:inherit}
+.duc-picker{position:relative;display:inline-block}
+.duc-pickerbtn{display:inline-flex;align-items:center;gap:8px;justify-content:space-between;min-width:190px;max-width:320px;border:1px solid ${colors.borderL1};background:${colors.bgLayer1};color:inherit;border-radius:6px;padding:5px 9px;cursor:pointer;font:inherit;text-align:left}
+.duc-pickerbtn:hover{background:${colors.hoverBg}}
+.duc-pickerbtn>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.duc-pickerpanel{position:absolute;top:calc(100% + 6px);left:0;z-index:30;display:flex;flex-direction:column;min-width:360px;max-height:360px;background:${colors.modalBg};color:${colors.modalText};border:1px solid ${colors.borderL2};border-radius:8px;box-shadow:0 10px 32px rgba(0,0,0,.22);overflow:hidden}
+@media (prefers-color-scheme: dark){.duc-pickerpanel{background:${colors.modalBgDark};color:${colors.modalTextDark}}}
+.duc-pickersearch{padding:8px 8px 4px}
+.duc-pickersearch .duc-input{width:100%;min-width:0}
+.duc-pickerlist{overflow:auto;padding:0 4px 6px}
+.duc-pickerrow{display:flex;align-items:center;gap:8px;width:100%;border:none;background:transparent;color:inherit;border-radius:6px;padding:6px 8px;cursor:pointer;font:inherit;text-align:left}
+.duc-pickerrow:hover{background:${colors.hoverBg}}
+.duc-pickerrow[aria-pressed=true]{font-weight:600}
 .duc-glyph{color:${colors.labelSecondary}}
 .duc-glyph[data-active=true]{color:inherit}
 .duc-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:60}
@@ -942,6 +952,109 @@ select.duc-input{min-width:100px}
       return localized === key ? kind : localized;
     }
 
+    /**
+     * Searchable session picker. Loads the light `/sessions` list ONLY when
+     * opened — the requests page's poll never pays for the context overview
+     * (P1) — groups subagents under their parent with badges and indents,
+     * and filters by title / id / path as you type; a match keeps its
+     * parent and children visible (P2).
+     */
+    function SessionPicker({ t, fmt, value, label, onPick }) {
+      const [open, setOpen] = useState(false);
+      const [search, setSearch] = useState('');
+      const [state, setState] = useState({ loading: false, error: null, items: null });
+      useEffect(() => {
+        if (!open) return;
+        let alive = true;
+        setState((prev) => ({ ...prev, loading: prev.items === null, error: null }));
+        api('/sessions', { limit: 200, offset: 0 })
+          .then((payload) => {
+            if (!alive) return;
+            setState({ loading: false, error: null, items: payload?.items ?? [] });
+          })
+          .catch((error) => {
+            if (!alive) return;
+            setState((prev) => ({
+              loading: false, error: String(error?.message ?? error), items: prev.items,
+            }));
+          });
+        return () => { alive = false; };
+      }, [open]);
+      const items = state.items ?? [];
+      const q = search.trim().toLowerCase();
+      const matches = (s) => q.length === 0
+        || sessionName(s).toLowerCase().includes(q)
+        || s.sessionId.toLowerCase().includes(q)
+        || (s.cwd ?? '').toLowerCase().includes(q);
+      const byParent = new Map();
+      for (const s of items) {
+        if (s.parentSessionId === null || s.parentSessionId === undefined) continue;
+        const list = byParent.get(s.parentSessionId) ?? [];
+        list.push(s);
+        byParent.set(s.parentSessionId, list);
+      }
+      const visible = new Set();
+      for (const s of items) {
+        if (!matches(s)) continue;
+        visible.add(s.sessionId);
+        if (s.parentSessionId !== null && s.parentSessionId !== undefined) visible.add(s.parentSessionId);
+        for (const kid of byParent.get(s.sessionId) ?? []) visible.add(kid.sessionId);
+      }
+      const known = new Set(items.map((s) => s.sessionId));
+      const roots = items
+        .filter((s) => visible.has(s.sessionId)
+          && (s.parentSessionId === null || s.parentSessionId === undefined || !known.has(s.parentSessionId)))
+        .sort((a, b) => (b.lastTimestamp ?? 0) - (a.lastTimestamp ?? 0));
+      const row = (s, depth) => h('button', {
+        type: 'button', className: 'duc-pickerrow', 'aria-pressed': String(s.sessionId === value),
+        onClick: () => { onPick(s.sessionId, sessionName(s)); setOpen(false); },
+      },
+        h('span', { style: { paddingLeft: depth * 16, display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 } },
+          h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+            sessionName(s)),
+          s.origin === 'subagent' ? h('span', { className: 'duc-badge' }, t('origin.subagent')) : null,
+        ),
+        h('span', { className: 'duc-small duc-muted', style: { marginLeft: 'auto', flex: 'none' } },
+          `${fmt.int(s.requests)} ${t('chart.requestsUnit')}`),
+      );
+      return h('div', { className: 'duc-picker' },
+        h('button', {
+          type: 'button', className: 'duc-pickerbtn', title: value || undefined,
+          onClick: () => setOpen((v) => !v),
+        },
+          h('span', null, value ? (label ?? `${value.slice(0, 16)}…`) : t('filter.allSessions')),
+          h('span', { className: 'duc-muted', 'aria-hidden': 'true' }, open ? '▴' : '▾'),
+        ),
+        open
+          ? h('div', { className: 'duc-pickerpanel' },
+              h('div', { className: 'duc-pickersearch' },
+                h('input', {
+                  className: 'duc-input', placeholder: t('filter.searchSession'),
+                  value: search,
+                  onChange: (e) => setSearch(e.target.value),
+                })),
+              h('div', { className: 'duc-pickerlist' },
+                h('button', {
+                  type: 'button', className: 'duc-pickerrow', 'aria-pressed': String(value === ''),
+                  onClick: () => { onPick('', null); setOpen(false); },
+                }, h('span', null, t('filter.allSessions'))),
+                state.items === null && state.loading
+                  ? h('div', { className: 'duc-state duc-small' }, t('state.loading'))
+                  : state.items === null && state.error !== null
+                    ? h('div', { className: 'duc-state duc-small duc-error' }, `${t('state.error')} — ${state.error}`)
+                    : roots.flatMap((s) => {
+                        const kids = (byParent.get(s.sessionId) ?? []).filter((k) => visible.has(k.sessionId));
+                        return [row(s, 0), ...kids.map((k) => row(k, 1))];
+                      }),
+                state.items !== null && roots.length === 0 && q.length > 0
+                  ? h('div', { className: 'duc-state duc-small' }, t('state.empty'))
+                  : null,
+              ),
+            )
+          : null,
+      );
+    }
+
     function RequestsTab({ t, fmt, filters, setFilters }) {
       const limit = 50;
       const page = filters.page ?? 0;
@@ -972,6 +1085,14 @@ select.duc-input{min-width:100px}
       const result = data?.res;
       const items = result?.items ?? [];
       const total = result?.total ?? 0;
+      // The picker is the context panel's entry point; picking a session
+      // keeps its display label so the panel header survives tab switches.
+      const setSession = (sessionId, sessionLabel) => setFilters((prev) => ({
+        ...prev,
+        sessionId: sessionId === '' ? undefined : sessionId,
+        sessionLabel: sessionLabel ?? undefined,
+        page: 0,
+      }));
       return h('div', null,
         h('div', { className: 'duc-filters' },
           h('select', {
@@ -995,10 +1116,11 @@ select.duc-input{min-width:100px}
             h('option', { value: '' }, t('filter.kind')),
             KIND_OPTIONS.map((kind) => h('option', { key: kind, value: kind }, kindLabel(kind, t))),
           ),
-          h('input', {
-            className: 'duc-input', placeholder: t('filter.session'),
-            value: filters.sessionId ?? '', title: filters.sessionId || undefined,
-            onChange: (e) => setInput('sessionId', e.target.value.trim()),
+          h(SessionPicker, {
+            t, fmt,
+            value: filters.sessionId ?? '',
+            label: filters.sessionLabel,
+            onPick: setSession,
           }),
           (filters.provider || filters.model || filters.kind || filters.sessionId)
             ? h('button', {
@@ -1006,6 +1128,12 @@ select.duc-input{min-width:100px}
               onClick: () => setFilters({ page: 0 }),
             }, t('filter.clear')) : null,
         ),
+        filters.sessionId !== undefined && filters.sessionId !== ''
+          ? h(ContextSessionPanel, {
+              session: { sessionId: filters.sessionId, label: filters.sessionLabel },
+              t, fmt,
+            })
+          : null,
         h(StateView, { loading, error, empty: !loading && total === 0, onRetry: refresh, t },
           h('div', { className: 'duc-tablewrap' },
             h('table', { className: 'duc-table' },
@@ -1557,29 +1685,41 @@ select.duc-input{min-width:100px}
       return `${s.sessionId.slice(0, 16)}…`;
     }
 
-    function ContextTab({ t, fmt }) {
-      // Phase 2: overview is a session tree with ABSOLUTE input numbers (no
-      // "random latest session" cards); selecting a row pins the metric row
-      // and the trend to that session. Core questions answered: how much went
-      // in on the last request, how it changed, the historical max — the
-      // window ratio stays secondary and is never a "remaining budget".
-      const [selected, setSelected] = useState(null);
-      const [expanded, setExpanded] = useState({});
+    /** Context diagnostics for one session, embedded in the requests page
+     *  while that session is selected in the filter row — the session
+     *  dropdown IS the switcher (no separate context page anymore). Owns
+     *  the range / attempts / pinned state. */
+    function ContextSessionPanel({ session, t, fmt }) {
       const [range, setRange] = useState(200);
       const [showAttempts, setShowAttempts] = useState(false);
       const [pinnedId, setPinnedId] = useState(null);
-      const overview = useLoad(
-        () => [['ctx', selected === null ? api('/context') : Promise.resolve({})]],
-        [selected === null],
-      );
       const detail = useLoad(
-        () => [['d', selected !== null ? api('/context', { sessionId: selected.sessionId }) : Promise.resolve({})]],
-        [selected],
+        () => [['d', api('/context', { sessionId: session.sessionId })]],
+        [session.sessionId],
       );
-
-      if (selected !== null) {
-        const row = selected.row;
-        const observations = detail.data?.d?.observations ?? [];
+      const observations = detail.data?.d?.observations ?? [];
+      // Summary cards derive from the observation series itself — ONE fetch,
+      // no context-overview call; only the record total comes from the
+      // server (records without observable usage are not observations).
+      const chatObs = observations.filter((o) => o.kind === 'chat' && o.inputTokens !== null);
+      const last = chatObs.length > 0 ? chatObs[chatObs.length - 1] : null;
+      const prev = chatObs.length > 1 ? chatObs[chatObs.length - 2] : null;
+      const row = {
+        sessionId: session.sessionId,
+        title: session.label ?? null,
+        cwd: null,
+        lastInput: last === null ? null : last.inputTokens,
+        lastInputAt: last === null ? null : last.timestamp,
+        prevInput: prev === null ? null : prev.inputTokens,
+        delta: last !== null && prev !== null ? last.inputTokens - prev.inputTokens : null,
+        modelSwitched: last !== null && prev !== null
+          && last.model !== null && prev.model !== null && last.model !== prev.model,
+        maxInput: chatObs.reduce((m, o) => Math.max(m, o.inputTokens), 0) || null,
+        observedRequests: chatObs.length,
+        totalRequests: detail.data?.d?.totalRequests ?? chatObs.length,
+        compactions: observations.filter((o) => o.kind === 'compaction').length,
+        contextWindow: observations.length > 0 ? observations[observations.length - 1].contextWindow : null,
+      };
         // Delta / model-switch over the FULL chat series, computed before any
         // range slicing so the first visible point still knows its previous.
         const chatMeta = new Map();
@@ -1635,14 +1775,8 @@ select.duc-input{min-width:100px}
           emptyText: t('context.noUsage'),
           onRetry: detail.refresh, t,
         },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 } },
-            h('button', {
-              type: 'button', className: 'duc-backbtn',
-              onClick: () => setSelected(null),
-            }, `← ${t('context.back')}`),
-            h('span', { className: 'duc-small duc-muted' },
-              `${t('context.selected')} · ${sessionName(row)}`),
-          ),
+          h('div', { className: 'duc-small duc-muted', style: { marginBottom: 8 } },
+            `${t('context.selected')} · ${sessionName(row)}`),
           h('div', { className: 'duc-grid' },
             h(StatCard, {
               title: t('context.lastInput'),
@@ -1765,99 +1899,11 @@ select.duc-input{min-width:100px}
                 ),
               ) : null,
         );
-      }
-
-      const sessions = overview.data?.ctx?.sessions ?? [];
-      const known = new Set(sessions.map((s) => s.sessionId));
-      const byParent = new Map();
-      for (const s of sessions) {
-        if (s.parentSessionId === null || s.parentSessionId === undefined) continue;
-        if (!known.has(s.parentSessionId)) continue;
-        const list = byParent.get(s.parentSessionId) ?? [];
-        list.push(s);
-        byParent.set(s.parentSessionId, list);
-      }
-      const roots = sessions.filter(
-        (s) => s.parentSessionId === null || s.parentSessionId === undefined || !known.has(s.parentSessionId),
-      );
-      const deltaCell = (s) => {
-        if (s.delta === null) return '–';
-        return h('span', null,
-          `${s.delta >= 0 ? '+' : ''}${fmt.compact(s.delta)}`,
-          s.modelSwitched ? h('span', { className: 'duc-badge', style: { marginLeft: 6 } }, '⇄') : null,
-        );
-      };
-      const renderRow = (s, depth) => {
-        const kids = byParent.get(s.sessionId) ?? [];
-        const isOpen = expanded[s.sessionId] === true;
-        const ratio = s.lastInput !== null && s.contextWindow !== null
-          ? `${Math.round((s.lastInput / s.contextWindow) * 100)}%` : null;
-        const rows = [h('tr', {
-          key: s.sessionId, className: 'clickable',
-          title: `${s.sessionId}${s.delta !== null ? `\n${t('context.prev')}: ${s.prevInput} → ${t('context.lastInput')}: ${s.lastInput}` : ''}`,
-          onClick: () => setSelected({ sessionId: s.sessionId, row: s }),
-        },
-          h('td', null,
-            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, paddingLeft: depth * 18 } },
-              kids.length > 0
-                ? h('button', {
-                  type: 'button', className: 'duc-expander', 'aria-expanded': String(isOpen),
-                  'aria-label': t('ledger.expand'),
-                  onClick: (e) => {
-                    e?.stopPropagation?.();
-                    setExpanded((prev) => ({ ...prev, [s.sessionId]: !(prev[s.sessionId] === true) }));
-                  },
-                }, isOpen ? '▾' : '▸')
-                : h('span', { style: { display: 'inline-block', width: 14 }, 'aria-hidden': 'true' }),
-              h('span', null, sessionName(s)),
-              s.origin === 'subagent' ? h('span', { className: 'duc-badge' }, t('origin.subagent')) : null,
-              s.observedRequests === 0 && s.totalRequests > 0
-                ? h('span', { className: 'duc-badge' }, t('context.noUsage')) : null,
-            )),
-          h('td', null, s.model ?? '–'),
-          h('td', { className: 'num' }, s.lastInput === null ? '–' : fmt.compact(s.lastInput)),
-          h('td', { className: 'num' }, deltaCell(s)),
-          h('td', { className: 'num' }, ratio === null ? '–' : ratio),
-          h('td', { className: 'num' }, s.contextWindow === null ? '–' : fmt.compact(s.contextWindow)),
-          h('td', { className: 'num' }, s.compactions > 0 ? fmt.int(s.compactions) : '–'),
-          h('td', { className: 'num' }, `${fmt.int(s.observedRequests)}/${fmt.int(s.totalRequests)}`),
-          h('td', null, s.lastObsAt === null ? '–' : fmt.dateTime(s.lastObsAt)),
-          h('td', { className: 'duc-muted', 'aria-hidden': 'true' }, '›'),
-        )];
-        if (isOpen) for (const kid of kids) rows.push(...renderRow(kid, depth + 1));
-        return rows;
-      };
-      return h(StateView, {
-        loading: overview.loading, error: overview.error,
-        empty: !overview.loading && sessions.length === 0,
-        emptyText: `${t('state.empty')} — ${t('context.emptyHint')}`,
-        onRetry: overview.refresh, t,
-      },
-        h('div', { className: 'duc-section' },
-          h('div', { className: 'duc-tablewrap' },
-            h('table', { className: 'duc-table' },
-              h('thead', null, h('tr', null,
-                h('th', null, t('table.session')),
-                h('th', null, t('table.model')),
-                h('th', { className: 'num' }, t('context.lastInput')),
-                h('th', { className: 'num' }, t('context.delta')),
-                h('th', { className: 'num' }, t('context.ofWindow')),
-                h('th', { className: 'num' }, t('context.window')),
-                h('th', { className: 'num' }, t('context.compactions')),
-                h('th', { className: 'num' }, t('context.observed')),
-                h('th', null, t('table.updated')),
-                h('th', { 'aria-hidden': 'true' }),
-              )),
-              h('tbody', null, roots.flatMap((s) => renderRow(s, 0))),
-            ),
-          ),
-        ),
-      );
     }
 
     // -------------------------------------------------------------- dashboard
 
-    const TABS = ['overview', 'requests', 'ledger', 'costs', 'context'];
+    const TABS = ['overview', 'requests', 'ledger', 'costs'];
 
     function DashboardView({ env }) {
       const [tab, setTab] = useState('overview');
@@ -1956,7 +2002,6 @@ select.duc-input{min-width:100px}
             },
           }) : null,
           tab === 'costs' ? h(CostsTab, { t, fmt, range }) : null,
-          tab === 'context' ? h(ContextTab, { t, fmt }) : null,
         ),
       );
     }

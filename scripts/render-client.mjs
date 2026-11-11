@@ -116,7 +116,7 @@ function payloadFor(path) {
             obs.push({ ...base, kind: 'chat' });
           }
         }
-        return { sessionId: 'session-dense', observations: obs };
+        return { sessionId: 'session-dense', totalRequests: 130, observations: obs };
       }
       const t0 = 1794280000000;
       const chat = (seq, inputTokens, over = {}) => ({
@@ -136,6 +136,7 @@ function payloadFor(path) {
       });
       return {
         sessionId: 'session-x-1234567890',
+        totalRequests: 42,
         observations: [
           chat(10, 20_000),
           chat(11, 30_000, { missingMask: 1, inputRaw: null }),
@@ -214,6 +215,7 @@ function payloadFor(path) {
       items: [
         {
           sessionId: 'session-main', createdAt: 1794270000000, cwd: 'C:\\ws',
+          title: 'Verify dashboard rendering',
           origin: null, parentSessionId: null, requests: 90,
           inputTokens: 200_000, outputTokens: 15_000, cacheReadTokens: 2_000_000,
           cacheWriteTokens: 0, totalTokens: 2_215_000, errorCount: 0,
@@ -221,13 +223,22 @@ function payloadFor(path) {
         },
         {
           sessionId: 'session-x-1234567890', createdAt: 1794280000000, cwd: 'C:\\ws\\proj',
+          title: 'Verify dashboard rendering (run 2)',
           origin: 'subagent', parentSessionId: 'session-main', requests: 30,
           inputTokens: 224_258, outputTokens: 19_562, cacheReadTokens: 2_538_176,
           cacheWriteTokens: 0, totalTokens: 2_781_996, errorCount: 1,
           firstTimestamp: 1794280000000, lastTimestamp: 1794280100000,
         },
+        {
+          sessionId: 'session-dense', createdAt: 1794280000000, cwd: 'C:\\ws\\dense',
+          title: 'Dense series',
+          origin: null, parentSessionId: null, requests: 130,
+          inputTokens: 815_000, outputTokens: 51_600, cacheReadTokens: 0,
+          cacheWriteTokens: 0, totalTokens: 866_600, errorCount: 0,
+          firstTimestamp: 1794280000000, lastTimestamp: 1794284000000,
+        },
       ],
-      total: 2,
+      total: 3,
     };
   }
   throw new Error(`unexpected fetch ${path}`);
@@ -457,18 +468,28 @@ const clickTab = async (label) => {
   await settle();
   tree = renderDashboard();
 };
-for (const label of ['请求', '台账', '费用', '上下文', '总览', '请求']) {
+for (const label of ['请求', '台账', '费用', '总览', '请求']) {
   await clickTab(label);
 }
 
 assert.match(textOf(tree), /上一页/, 'requests pager rendered');
 
-// Requests filters: provider/model dropdowns populated from ledger facets.
+// Requests filters: provider/model/kind dropdowns from ledger facets; the
+// session picker loads nothing until opened (no eager context overview).
 const filterSelects = collectNodes(tree).filter((n) => n.tag === 'select');
 assert.ok(filterSelects.length >= 3, 'provider/model/kind dropdowns rendered');
 const filterSelectText = filterSelects.map((s) => textOf(s)).join('|');
 assert.match(filterSelectText, /glm-5\.3/, 'model options populated');
 assert.match(filterSelectText, /deepseek-account/, 'provider options populated');
+assert.ok(
+  !fetchedUrls.some((u) => u.endsWith('/context')),
+  'no eager context-overview fetch on the requests page',
+);
+const pickerBtn = () => collectNodes(tree).find(
+  (n) => n.tag === 'button' && n.props.className === 'duc-pickerbtn',
+);
+assert.ok(pickerBtn() !== undefined, 'session picker button rendered');
+assert.match(textOf(pickerBtn()), /全部会话/, 'picker defaults to all sessions');
 
 // Costs (unconfigured): unified table with per-category price columns ("–").
 await clickTab('费用');
@@ -532,20 +553,36 @@ assert.equal(importedBody.models[0].model, 'glm-5.3');
 assert.equal(importedBody.models[0].cacheWrite, 0.7);
 assert.match(textOf(tree), /参考价已写入配置/, 'imported notice rendered');
 
-// Context monitor: observation overview (absolute inputs + tree), drill in.
-await clickTab('上下文');
-assert.match(textOf(tree), /最近输入/, 'overview shows absolute last input');
-assert.match(textOf(tree), /Verify dashboard rendering/, 'session title rendered');
-assert.match(textOf(tree), /占窗口/, 'window-ratio column present');
-const contextRow = collectNodes(tree).find((n) => n.tag === 'tr' && typeof n.props.onClick === 'function');
-assert.ok(contextRow !== undefined, 'context row clickable');
-contextRow.props.onClick();
+// Context diagnostics live INSIDE the requests page: the session picker
+// (lazy /sessions on open, searchable tree) embeds the panel on pick.
+await clickTab('请求');
+pickerBtn().props.onClick();
 dirty = true;
 await settle();
 tree = renderDashboard();
+const pickerSearch = () => collectNodes(tree).find(
+  (n) => n.tag === 'input' && typeof n.props.onChange === 'function'
+    && String(n.props.placeholder ?? '').includes('搜索会话'),
+);
+assert.ok(pickerSearch() !== undefined, 'picker search input rendered');
+assert.match(textOf(tree), /子代理/, 'subagent badge shown in the picker tree');
+assert.ok(
+  fetchedUrls.some((u) => u.includes('/sessions')),
+  'picker lazy-loaded the session list on open',
+);
+const pickRow = (label) => collectNodes(tree).find(
+  (n) => n.tag === 'button' && n.props.className === 'duc-pickerrow' && textOf(n).includes(label),
+);
+const run2 = pickRow('run 2');
+assert.ok(run2 !== undefined, 'session options labeled with titles');
+run2.props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(pickerBtn()), /run 2/, 'picker shows the picked session');
 assert.match(textOf(tree), /seq 10/, 'context series chart rendered');
 assert.match(textOf(tree), /seq 18/, 'chart spans the whole series by default');
-assert.match(textOf(tree), /所选会话/, 'detail metrics bound to the clicked session');
+assert.match(textOf(tree), /所选会话/, 'panel metrics bound to the selected session');
 assert.match(textOf(tree), /历史最大输入/, 'max-input metric rendered');
 assert.match(textOf(tree), /较上次/, 'delta metric rendered');
 assert.match(textOf(tree), /窗口剩余/, 'window headroom disclaimer rendered');
@@ -660,20 +697,31 @@ await settle();
 tree = renderDashboard();
 assert.match(textOf(tree), /seq 10/, 'narrow range still renders the series');
 
-// Prominent back button at the top of the detail view returns to the overview.
-const backBtn = collectNodes(tree).find((n) => n.tag === 'button' && n.props.className === 'duc-backbtn');
-assert.ok(backBtn !== undefined, 'prominent back button rendered at the top');
-backBtn.props.onClick();
+// Clearing via the picker's "all sessions" entry removes the panel.
+pickerBtn().props.onClick();
 dirty = true;
 await settle();
 tree = renderDashboard();
-assert.match(textOf(tree), /占窗口/, 'back button returns to the session overview');
+pickRow('全部会话').props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.ok(!textOf(tree).includes('压缩诊断'), 'context panel leaves with the session filter');
+assert.match(textOf(tree), /上一页/, 'requests table back to the unfiltered view');
 
 // Dense series (130 samples, ~5.1px spacing): nearest-point precision and
-// segment edges that stop at unknown-window regions.
-const denseRows = collectNodes(tree).filter((n) => n.tag === 'tr' && typeof n.props.onClick === 'function');
-assert.ok(denseRows.length >= 2, 'second session row present');
-denseRows[1].props.onClick();
+// segment edges that stop at unknown-window regions. Found via SEARCH.
+pickerBtn().props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+pickerSearch().props.onChange({ target: { value: 'dense' } });
+dirty = true;
+await settle();
+tree = renderDashboard();
+const denseRow = pickRow('Dense series');
+assert.ok(denseRow !== undefined, 'search narrows the picker to the dense session');
+denseRow.props.onClick();
 dirty = true;
 await settle();
 tree = renderDashboard();

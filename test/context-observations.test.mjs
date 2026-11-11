@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { UsageDatabase } from '../lib/storage/database.js';
+import { QueryService } from '../lib/query/query-service.js';
 
 function record(over = {}) {
   return {
@@ -240,6 +241,17 @@ test('context detail joins fresh costs without a manual rebuild (read-after-writ
   const [amended] = db.contextObservations('s1');
   assert.equal(amended.inputTokens, 2_000_000);
   assert.equal(amended.costMicro, 2_000_000, 'amended usage updates the estimate on the same read path');
+  db.close();
+});
+
+test('context detail carries the session record total (usage-less records included)', () => {
+  const db = new UsageDatabase(':memory:');
+  db.upsertContextSample(decl(1, 100_000));
+  db.upsertRecord(record({ requestId: 's1:2', seq: 2, inputTokens: 100, cacheReadTokens: 0 }));
+  db.upsertRecord(record({ requestId: 's1:3', seq: 3, inputTokens: null, cacheReadTokens: null, cacheWriteTokens: null }));
+  const view = new QueryService(db).context('s1');
+  assert.equal(view.totalRequests, 2, 'both ledger records counted — the panel cannot derive this alone');
+  assert.equal(view.observations.length, 1, 'only the usage-bearing record is an observation');
   db.close();
 });
 
