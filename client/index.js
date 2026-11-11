@@ -129,6 +129,8 @@ window.__ModuleLoader__.load({
       'suggest.match.fuzzy': '近似',
       'suggest.match.normalized': '归一化',
       'suggest.match.normalized.reason': '版本归一化匹配：{from} → {to}',
+      'suggest.match.pending': '待确认',
+      'suggest.match.pick': '选择候选',
       'suggest.match.ambiguous': '存在多个候选，请手动选择',
       'suggest.match.none': '无匹配',
       'suggest.fetching': '正在从 OpenRouter 拉取…',
@@ -292,6 +294,8 @@ window.__ModuleLoader__.load({
       'suggest.match.fuzzy': 'approx.',
       'suggest.match.normalized': 'normalized',
       'suggest.match.normalized.reason': 'Version-normalized match: {from} → {to}',
+      'suggest.match.pending': 'pending confirmation',
+      'suggest.match.pick': 'pick a candidate',
       'suggest.match.ambiguous': 'Multiple candidates — pick one manually',
       'suggest.match.none': 'no match',
       'suggest.fetching': 'Fetching from OpenRouter…',
@@ -1456,9 +1460,20 @@ select.duc-input{min-width:100px}
             value: pickedCand[keyOf(s)] ?? '',
             onChange: (e) => setPickedCand((prev) => ({ ...prev, [keyOf(s)]: e?.target?.value ?? '' })),
           },
-            h('option', { value: '' }, t('suggest.match.ambiguous')),
+            h('option', { value: '' }, t('suggest.match.pick')),
             candidatesOf(s).map((c) => h('option', { key: c.id, value: c.id }, `${c.id} (${t('suggest.match.normalized')})`)),
           );
+        }
+        if (s.matchQuality === 'normalized') {
+          // Same single-line shape as every other row; the mapping detail
+          // lives in the tooltip. Pending mark stays until checked.
+          const eff = chosenOf(s);
+          const to = eff === null ? null : (eff.id ?? eff.matchId);
+          if (to === null) return t('suggest.match.none');
+          const tag = checked[keyOf(s)] === true
+            ? t('suggest.match.normalized')
+            : `${t('suggest.match.normalized')} · ${t('suggest.match.pending')}`;
+          return `${to} (${tag})`;
         }
         return s.matchId === null ? t('suggest.match.none') : `${s.matchId} (${matchTag(s)})`;
       };
@@ -1487,6 +1502,7 @@ select.duc-input{min-width:100px}
         apiPost('/prices/import', {
           models: selected.map((s) => {
             const eff = chosenOf(s) ?? s;
+            const source = eff.id ?? eff.matchId ?? null;
             return {
               provider: s.provider ?? undefined,
               model: s.model,
@@ -1494,6 +1510,11 @@ select.duc-input{min-width:100px}
               output: eff.output ?? undefined,
               cacheRead: eff.cacheRead ?? undefined,
               cacheWrite: eff.cacheWrite ?? undefined,
+              // The price list keys on the LEDGER (provider, model); when
+              // the matched catalog id differs, record it for audit.
+              ...(source !== null && source !== `${s.provider ?? ''}/${s.model}`
+                ? { sourceModel: source }
+                : {}),
             };
           }),
           ...(historyChoice === 'earlier' && firstDate !== null ? { effectiveFrom: firstDate } : {}),

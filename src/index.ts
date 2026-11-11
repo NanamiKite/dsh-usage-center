@@ -385,7 +385,7 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
               return;
             }
             const rows: Array<{
-              provider?: string; model: string;
+              provider?: string; model: string; sourceModel?: string;
               input?: number; output?: number; cacheRead?: number; cacheWrite?: number;
             }> = [];
             for (const item of rawModels) {
@@ -409,6 +409,12 @@ export function apply(ctx: HostContext, config: UsageCenterConfig = {}): void {
               const row: typeof rows[number] = { model: record.model };
               if (typeof record.provider === 'string' && record.provider.length > 0) {
                 row.provider = record.provider;
+              }
+              // Audit metadata: the catalog id the prices came from when it
+              // differs from the ledger pair the row keys on (normalized or
+              // cross-namespace matches). The pricing engine ignores it.
+              if (typeof record.sourceModel === 'string' && record.sourceModel.trim().length > 0) {
+                row.sourceModel = record.sourceModel.trim();
               }
               const input = price('input');
               const output = price('output');

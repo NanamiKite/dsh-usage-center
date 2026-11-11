@@ -262,7 +262,7 @@ const suggestFixture = {
     { provider: 'deepseek-account', model: 'deepseek-flash', requests: 90, tokens: 11_000_000, matchId: 'deepseek/deepseek-flash', matchName: 'DeepSeek Flash', matchQuality: 'exact', input: 0.27, output: 1.1, cacheRead: 0.007, cacheWrite: null, checked: true, normalizedCandidates: [] },
     { provider: 'gpt', model: 'gpt-6.1-sol', requests: 10, tokens: 8630, matchId: null, matchName: null, matchQuality: null, input: null, output: null, cacheRead: null, cacheWrite: null, checked: false, normalizedCandidates: [] },
     { provider: 'anthropic', model: 'claude5-5', requests: 8, tokens: 900_000, matchId: 'anthropic/claude5.5', matchName: 'Claude 5.5', matchQuality: 'normalized', normalizedCandidates: [{ id: 'anthropic/claude5.5', input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }], input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, checked: false },
-    { provider: 'qwenlab', model: 'qwen-4-6', requests: 2, tokens: 40_000, matchId: null, matchName: null, matchQuality: 'normalized', normalizedCandidates: [
+    { provider: 'my-router', model: 'qwen-4-6', requests: 2, tokens: 40_000, matchId: null, matchName: null, matchQuality: 'normalized', normalizedCandidates: [
       { id: 'openrouter/qwen-4.6', input: 0.5, output: 2.2, cacheRead: null, cacheWrite: null },
       { id: 'qwenlab/qwen-4.6', input: 0.6, output: 2.4, cacheRead: null, cacheWrite: null },
     ], input: null, output: null, cacheRead: null, cacheWrite: null, checked: false },
@@ -613,9 +613,14 @@ assert.equal(boxes[4].props.disabled, true, 'ambiguous row disabled until a cand
 const normTip = collectNodes(tree).find(
   (n) => n.tag === 'td' && String(n.props.title ?? '').includes('claude5-5 → anthropic/claude5.5'));
 assert.ok(normTip !== undefined, 'normalized reason tooltip rendered');
+// Single-line cell like every other row; pending mark visible, detail in tooltip.
+assert.match(textOf(tree), /归一化 · 待确认/, 'unchecked normalized row marked pending');
 const candSelect = collectNodes(tree).find(
-  (n) => n.tag === 'select' && textOf(n).includes('存在多个候选'));
+  (n) => n.tag === 'select' && textOf(n).includes('选择候选'));
 assert.ok(candSelect !== undefined, 'manual-pick select rendered');
+const ambTip = collectNodes(tree).find(
+  (n) => n.tag === 'td' && String(n.props.title ?? '').includes('存在多个候选'));
+assert.ok(ambTip !== undefined, 'ambiguity reason kept in the tooltip');
 assert.deepEqual(
   collectNodes(candSelect).filter((n) => n.tag === 'option').map((n) => n.props.value),
   ['', 'openrouter/qwen-4.6', 'qwenlab/qwen-4.6'],
@@ -656,9 +661,12 @@ assert.equal(importedBody.models[0].model, 'glm-5.3');
 assert.equal(importedBody.models[0].cacheWrite, 0.7);
 const claudeRow = importedBody.models.find((m) => m.model === 'claude5-5');
 assert.equal(claudeRow?.input, 3, 'normalized single posts its catalog prices');
+assert.equal(claudeRow?.sourceModel, 'anthropic/claude5.5', 'normalized row records its catalog source');
 const qwenRow = importedBody.models.find((m) => m.model === 'qwen-4-6');
 assert.equal(qwenRow?.input, 0.6, 'manual pick posts the chosen candidate prices');
 assert.equal(qwenRow?.output, 2.4);
+assert.equal(qwenRow?.sourceModel, 'qwenlab/qwen-4.6', 'manual pick records the chosen candidate as source');
+assert.equal(importedBody.models[0]?.sourceModel, 'z-ai/glm-5.3', 'cross-namespace suffix match records its source');
 assert.equal(importedBody.retroactive, true, 'the retro choice rides along with the import');
 assert.match(textOf(tree), /参考价已写入配置/, 'imported notice rendered');
 

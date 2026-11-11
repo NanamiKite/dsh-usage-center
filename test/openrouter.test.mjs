@@ -174,18 +174,36 @@ test('preview variants are not version-matched', () => {
   assert.deepEqual(normalizedMatches({ provider: 'openai', model: 'gpt-5-preview' }, twins), []);
 });
 
+test('provider-aligned normalized candidate beats cross-provider twins', () => {
+  const fixture = [
+    { id: 'openrouter/qwen-4.6', name: 'Qwen 4.6 (openrouter)', pricing: { prompt: '0.0000005', completion: '0.0000022' } },
+    { id: 'qwenlab/qwen-4.6', name: 'Qwen 4.6', pricing: { prompt: '0.0000006', completion: '0.0000024' } },
+  ];
+  // The ledger provider lines up with one candidate: no manual pick needed.
+  const [row] = buildSuggestions([{ provider: 'qwenlab', model: 'qwen-4-6', requests: 2, tokens: 40000 }], fixture);
+  assert.equal(row?.matchId, 'qwenlab/qwen-4.6');
+  assert.equal(row?.matchQuality, 'normalized');
+  assert.equal(row?.input, 0.6);
+  assert.equal(row?.checked, false);
+  assert.deepEqual(row?.normalizedCandidates?.map((c) => c.id), ['qwenlab/qwen-4.6']);
+  // Account-qualified providers align via their first segment, too.
+  const [acct] = buildSuggestions([{ provider: 'qwenlab-account', model: 'qwen-4-6', requests: 1, tokens: 1 }], fixture);
+  assert.equal(acct?.matchId, 'qwenlab/qwen-4.6');
+});
+
 test('multiple normalized candidates are never auto-picked', () => {
   const fixture = [
     { id: 'qwenlab/qwen-4.6', name: 'Qwen 4.6', pricing: { prompt: '0.0000006', completion: '0.0000024' } },
     { id: 'openrouter/qwen-4.6', name: 'Qwen 4.6 (openrouter)', pricing: { prompt: '0.0000005', completion: '0.0000022' } },
   ];
-  const [row] = buildSuggestions([{ provider: 'qwenlab', model: 'qwen-4-6', requests: 2, tokens: 40000 }], fixture);
+  // No candidate aligns with the ledger provider: all cross-provider twins
+  // stay ambiguous — no auto-pick by id length or catalog order.
+  const [row] = buildSuggestions([{ provider: 'my-router', model: 'qwen-4-6', requests: 2, tokens: 40000 }], fixture);
   assert.equal(row?.matchId, null);
   assert.equal(row?.matchName, null);
   assert.equal(row?.matchQuality, 'normalized');
   assert.equal(row?.checked, false);
   assert.equal(row?.input, null);
-  // Sorted by id for stable display — not catalog order, no shortest-id pick.
   assert.deepEqual(row?.normalizedCandidates?.map((c) => c.id), ['openrouter/qwen-4.6', 'qwenlab/qwen-4.6']);
   assert.equal(row?.normalizedCandidates?.[1]?.input, 0.6);
 });
