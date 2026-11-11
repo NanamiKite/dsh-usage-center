@@ -42,6 +42,9 @@ globalThis.document = {
   },
   head: { appendChild(tag) { styleTags.push(tag); } },
   documentElement: {},
+  // Outside-click dismissal registers these when a picker panel is open.
+  addEventListener: () => {},
+  removeEventListener: () => {},
 };
 // Themed-mode probe: the stub reports a reachable brand token, so this
 // harness exercises the var(--token, literal) path (the render drive runs

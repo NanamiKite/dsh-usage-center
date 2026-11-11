@@ -979,12 +979,30 @@ select.duc-input{min-width:100px}
      * and filters by title / id / path as you type; a match keeps its
      * parent and children visible (P2).
      */
+    /** Native-select feel: any pointer-down outside the open panel's root
+     *  closes it. No-ops without a real DOM (render drive fakes document). */
+    function useDismissOnOutside(open, rootRef, onClose) {
+      useEffect(() => {
+        if (!open || typeof document === 'undefined') return undefined;
+        const onDown = (e) => {
+          const root = rootRef.current;
+          if (root === null || root === undefined) return;
+          if (typeof root.contains === 'function' && root.contains(e.target)) return;
+          onClose();
+        };
+        document.addEventListener('mousedown', onDown);
+        return () => document.removeEventListener('mousedown', onDown);
+      });
+    }
+
     function SessionPicker({ t, fmt, value, label, onPick, open: openProp, onToggle }) {
       const [openState, setOpenState] = useState(false);
       const open = openProp ?? openState;
       // Controlled (exclusive) or internal toggle — same chrome either way.
       const togglePanel = () => (onToggle !== undefined ? onToggle() : setOpenState((v) => !v));
       const closePanel = () => (onToggle !== undefined ? onToggle() : setOpenState(false));
+      const rootRef = useRef(null);
+      useDismissOnOutside(open, rootRef, closePanel);
       const [search, setSearch] = useState('');
       const [state, setState] = useState({ loading: false, error: null, items: null });
       useEffect(() => {
@@ -1041,7 +1059,7 @@ select.duc-input{min-width:100px}
         h('span', { className: 'duc-small duc-muted', style: { marginLeft: 'auto', flex: 'none' } },
           `${fmt.int(s.requests)} ${t('chart.requestsUnit')}`),
       );
-      return h('div', { className: 'duc-picker' },
+      return h('div', { className: 'duc-picker', ref: rootRef },
         h('button', {
           type: 'button', className: 'duc-pickerbtn', title: value || undefined,
           onClick: () => togglePanel(),
@@ -1088,8 +1106,10 @@ select.duc-input{min-width:100px}
       const open = openProp ?? openState;
       const togglePanel = () => (onToggle !== undefined ? onToggle() : setOpenState((v) => !v));
       const closePanel = () => (onToggle !== undefined ? onToggle() : setOpenState(false));
+      const rootRef = useRef(null);
+      useDismissOnOutside(open, rootRef, closePanel);
       const current = options.find((o) => o.value === value);
-      return h('div', { className: 'duc-picker' },
+      return h('div', { className: 'duc-picker', ref: rootRef },
         h('button', {
           type: 'button', className: 'duc-pickerbtn', title: current?.label ?? undefined,
           onClick: () => togglePanel(),

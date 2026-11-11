@@ -22,11 +22,18 @@ globalThis.window = {
   clearInterval: () => {},
   setTimeout: () => 0,
 };
+const docListeners = {}; // mousedown registry for outside-click dismissal
 globalThis.document = {
   createElement() {
     return { dataset: {}, style: {}, textContent: '', remove() {} };
   },
   head: { appendTag: true, appendChild(tag) { styleTags.push(tag); } },
+  addEventListener: (type, fn) => { (docListeners[type] ??= []).push(fn); },
+  removeEventListener: (type, fn) => {
+    const list = docListeners[type] ?? [];
+    const i = list.indexOf(fn);
+    if (i >= 0) list.splice(i, 1);
+  },
 };
 
 // ---------------------------------------------------------- stub fetch API
@@ -281,6 +288,7 @@ globalThis.fetch = (url, options) => {
 
 // ----------------------------------------------------------- fake React
 
+
 const instances = new Map(); // path -> { hooks: [], i: 0 }
 let current = null;
 let dirty = false;
@@ -371,7 +379,11 @@ function renderElement(el, path) {
     }
   }
   const children = renderElement(props.children ?? null, `${path}/${String(type)}`);
-  return { tag: String(type), props, children, path };
+  const node = { tag: String(type), props, children, path };
+  // Host refs and virtual containment, so outside-click logic is testable.
+  if (props.ref !== null && typeof props.ref === 'object') props.ref.current = node;
+  node.contains = (target) => target === node || collectNodes(node).includes(target);
+  return node;
 }
 
 function collectNodes(node, out = []) {
@@ -495,6 +507,18 @@ tree = renderDashboard();
 const providerRow = () => collectNodes(tree).find(
   (n) => n.tag === 'button' && n.props.className === 'duc-pickerrow' && textOf(n).includes('deepseek-account'));
 assert.ok(providerRow() !== undefined, 'provider options populated');
+// Outside pointer-down dismisses the open panel (native-select feel).
+assert.ok((docListeners.mousedown ?? []).length > 0, 'open panel registered a document listener');
+docListeners.mousedown.at(-1)({ target: { tag: 'outside' } });
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.ok(providerRow() === undefined, 'outside pointer-down closes the panel');
+pickerBtns()[0].props.onClick(); // reopen without picking
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.ok(providerRow() !== undefined, 'provider panel reopened');
 // Opening the model picker closes the provider panel (exclusive-open).
 pickerBtns()[1].props.onClick();
 dirty = true;
@@ -514,6 +538,12 @@ pickerBtns()[0].props.onClick();
 dirty = true;
 await settle();
 tree = renderDashboard();
+// Pointer-down inside the panel (on a row) keeps it open.
+docListeners.mousedown.at(-1)({ target: providerRow() });
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.ok(providerRow() !== undefined, 'inside pointer-down keeps the panel open');
 providerRow().props.onClick();
 dirty = true;
 await settle();
