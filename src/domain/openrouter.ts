@@ -23,7 +23,17 @@ export interface OpenRouterModel {
   pricing?: Record<string, unknown> | null;
 }
 
-export type MatchQuality = 'exact' | 'suffix' | 'fuzzy';
+export type MatchQuality = 'exact' | 'suffix' | 'normalized' | 'fuzzy';
+
+/** One version-normalized catalog candidate (the ambiguous multi-pick case). */
+export interface NormalizedCandidate {
+  id: string;
+  /** Per-1M USD prices; null = OpenRouter did not report that category. */
+  input: number | null;
+  output: number | null;
+  cacheRead: number | null;
+  cacheWrite: number | null;
+}
 
 export interface PriceSuggestion {
   provider: string | null;
@@ -33,7 +43,9 @@ export interface PriceSuggestion {
   matchId: string | null;
   matchName: string | null;
   matchQuality: MatchQuality | null;
-  /** Per-1M USD prices; null = OpenRouter did not report that category. */
+  /** All version-normalized candidates; >1 entry means no auto-pick. */
+  normalizedCandidates: NormalizedCandidate[];
+  /** Per-1M USD prices of the picked candidate; null = not reported. */
   input: number | null;
   output: number | null;
   cacheRead: number | null;
@@ -61,7 +73,24 @@ function round6(v: number): number {
 }
 
 /**
- * Best OpenRouter entry for one ledger pair.
+ * Conservative version-separator key: a hyphen between two single digits
+ * (each bounded by a non-digit or the string end) reads as a version dot —
+ * `claude5-5` → `claude5.5`, `gemini-2-5-pro` → `gemini-2.5-pro`.
+ * Everything else keeps its hyphens: letter segments (`deepseek-flash`),
+ * multi-digit runs (dates `2024-01`, snapshots `gpt-4o-2024-11-20`, sizes
+ * `glm-4-32b`). The comparison is key-equality on the whole id — no
+ * substring guessing — so both sides must correspond beyond that one
+ * separator.
+ */
+export function versionSeparatorKey(id: string): string {
+  return id.replace(/(^|[^0-9])([0-9])-([0-9])(?=[^0-9]|$)/g, '$1$2.$3');
+}
+
+/**
+ * Best deterministic OpenRouter entry for one ledger pair, by tier
+ * exact > suffix > fuzzy. The version-normalized tier is deliberately
+ * NOT resolved here: it can be ambiguous, so it is reported separately
+ * by normalizedMatches and the caller decides.
  * `deepseek-account` style provider names also try their first segment
  * (`deepseek`) so account-qualified providers still match exactly.
  */
@@ -77,7 +106,7 @@ export function matchOpenRouter(
   for (const candidate of models) {
     const id = candidate.id.toLowerCase();
     const quality = classify(id, candidate.name ?? null, model, providers);
-    if (quality === null) continue;
+    if (quality === null || quality === 'normalized') continue;
     // Same rank: prefer the shorter id so plain variants win over suffixed
     // variants (glm-5.3 over glm-5.3-flashx-legal) deterministically.
     const better =
@@ -87,6 +116,23 @@ export function matchOpenRouter(
     if (better) best = { model: candidate, quality };
   }
   return best;
+}
+
+/**
+ * Every catalog entry that matches only after version-separator
+ * normalization. Consulted when the deterministic tiers found nothing;
+ * more than one result means the caller must surface a manual pick
+ * (never auto-select by id length or catalog order).
+ */
+export function normalizedMatches(
+  pair: { provider: string | null; model: string | null },
+  models: readonly OpenRouterModel[],
+): OpenRouterModel[] {
+  const raw = pair.model?.trim().toLowerCase();
+  if (raw === undefined || raw.length === 0) return [];
+  const providers = providerCandidates(pair.provider);
+  return models.filter((candidate) =>
+    classify(candidate.id.toLowerCase(), null, raw, providers) === 'normalized');
 }
 
 function providerCandidates(provider: string | null | undefined): string[] {
@@ -112,13 +158,28 @@ function classify(
   if (id.endsWith(`/${model}`)) return 'suffix';
   const tail = id.slice(id.lastIndexOf('/') + 1);
   if (tail === model || tail.replaceAll(/[^a-z0-9.]/g, '') === model) return 'suffix';
+  // Version-separator reconciliation: the whole body must correspond, the
+  // only tolerated difference is single-digit hyphen ↔ dot.
+  const modelKey = versionSeparatorKey(model);
+  const tailKey = versionSeparatorKey(tail);
+  const idKey = versionSeparatorKey(id);
+  if (
+    tailKey === modelKey
+    || idKey === modelKey
+    || providers.some((p) => idKey === versionSeparatorKey(`${p}/${model}`))
+  ) {
+    return 'normalized';
+  }
   const name = displayName?.toLowerCase() ?? '';
   if (name.includes(model) || tail.includes(model)) return 'fuzzy';
   return null;
 }
 
 function rank(quality: MatchQuality): number {
-  return quality === 'exact' ? 0 : quality === 'suffix' ? 1 : 2;
+  if (quality === 'exact') return 0;
+  if (quality === 'suffix') return 1;
+  if (quality === 'normalized') return 2;
+  return 3;
 }
 
 /** Map every ledger pair to a suggestion row; best matches first-stable order. */
@@ -128,8 +189,68 @@ export function buildSuggestions(
 ): PriceSuggestion[] {
   return pairs.map((pair) => {
     const match = matchOpenRouter(pair, orModels);
-    const pricing = match?.model.pricing ?? null;
-    const pick = (key: string): number | null => (pricing === null ? null : perMillion(pricing[key]));
+    const pricingOf = (m: OpenRouterModel | undefined): Record<string, unknown> | null =>
+      m?.pricing ?? null;
+    const pick = (pricing: Record<string, unknown> | null, key: string): number | null =>
+      pricing === null ? null : perMillion(pricing[key]);
+    // Layered matching: exact/suffix win outright; the normalized tier
+    // outranks fuzzy but is never pre-checked, and multiple normalized
+    // candidates are surfaced for a manual pick instead of being resolved
+    // by id length or catalog order.
+    const normalized =
+      match === null || rank(match.quality) > rank('normalized')
+        ? normalizedMatches(pair, orModels)
+        : [];
+    if (normalized.length > 0) {
+      const toCandidate = (m: OpenRouterModel): NormalizedCandidate => {
+        const pricing = pricingOf(m);
+        return {
+          id: m.id,
+          input: pick(pricing, 'prompt'),
+          output: pick(pricing, 'completion'),
+          cacheRead: pick(pricing, 'input_cache_read'),
+          cacheWrite: pick(pricing, 'input_cache_write'),
+        };
+      };
+      const candidates = normalized.map(toCandidate)
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      const [only] = candidates;
+      const [onlyModel] = normalized;
+      if (candidates.length === 1 && only !== undefined) {
+        return {
+          provider: pair.provider,
+          model: pair.model ?? '',
+          requests: pair.requests,
+          tokens: pair.tokens,
+          matchId: only.id,
+          matchName: onlyModel?.name ?? null,
+          matchQuality: 'normalized' as const,
+          normalizedCandidates: candidates,
+          input: only.input,
+          output: only.output,
+          cacheRead: only.cacheRead,
+          cacheWrite: only.cacheWrite,
+          checked: false,
+        };
+      }
+      // Ambiguous: matchId stays null until the user picks one candidate.
+      return {
+        provider: pair.provider,
+        model: pair.model ?? '',
+        requests: pair.requests,
+        tokens: pair.tokens,
+        matchId: null,
+        matchName: null,
+        matchQuality: 'normalized' as const,
+        normalizedCandidates: candidates,
+        input: null,
+        output: null,
+        cacheRead: null,
+        cacheWrite: null,
+        checked: false,
+      };
+    }
+    const pricing = pricingOf(match?.model);
     const quality = match?.quality ?? null;
     return {
       provider: pair.provider,
@@ -139,10 +260,11 @@ export function buildSuggestions(
       matchId: match?.model.id ?? null,
       matchName: match?.model.name ?? null,
       matchQuality: quality,
-      input: pick('prompt'),
-      output: pick('completion'),
-      cacheRead: pick('input_cache_read'),
-      cacheWrite: pick('input_cache_write'),
+      normalizedCandidates: [],
+      input: pick(pricing, 'prompt'),
+      output: pick(pricing, 'completion'),
+      cacheRead: pick(pricing, 'input_cache_read'),
+      cacheWrite: pick(pricing, 'input_cache_write'),
       checked: quality === 'exact' || quality === 'suffix',
     };
   });

@@ -95,9 +95,9 @@ window.__ModuleLoader__.load({
       'table.workspace': '工作区',
       'table.created': '创建',
       'table.parent': '父会话',
-      'filter.provider': '提供商…',
-      'filter.model': '模型…',
-      'filter.kind': '类型…',
+      'filter.providerAll': '全部提供商',
+      'filter.modelAll': '全部模型',
+      'filter.kindAll': '全部类型',
       'filter.allSessions': '全部会话',
       'filter.searchSession': '搜索会话…',
       'filter.clear': '清除筛选',
@@ -127,6 +127,9 @@ window.__ModuleLoader__.load({
       'suggest.match.exact': '精确',
       'suggest.match.suffix': '一致',
       'suggest.match.fuzzy': '近似',
+      'suggest.match.normalized': '归一化',
+      'suggest.match.normalized.reason': '版本归一化匹配：{from} → {to}',
+      'suggest.match.ambiguous': '存在多个候选，请手动选择',
       'suggest.match.none': '无匹配',
       'suggest.fetching': '正在从 OpenRouter 拉取…',
       'suggest.history.title': '检测到 {n} 条早于今天的请求（最早 {date}）',
@@ -255,9 +258,9 @@ window.__ModuleLoader__.load({
       'table.workspace': 'Workspace',
       'table.created': 'Created',
       'table.parent': 'Parent',
-      'filter.provider': 'Provider…',
-      'filter.model': 'Model…',
-      'filter.kind': 'Kind…',
+      'filter.providerAll': 'All providers',
+      'filter.modelAll': 'All models',
+      'filter.kindAll': 'All kinds',
       'filter.allSessions': 'All sessions',
       'filter.searchSession': 'Search sessions…',
       'filter.clear': 'Clear filters',
@@ -287,6 +290,9 @@ window.__ModuleLoader__.load({
       'suggest.match.exact': 'exact',
       'suggest.match.suffix': 'id match',
       'suggest.match.fuzzy': 'approx.',
+      'suggest.match.normalized': 'normalized',
+      'suggest.match.normalized.reason': 'Version-normalized match: {from} → {to}',
+      'suggest.match.ambiguous': 'Multiple candidates — pick one manually',
       'suggest.match.none': 'no match',
       'suggest.fetching': 'Fetching from OpenRouter…',
       'suggest.history.title': '{n} requests predate today (earliest {date})',
@@ -973,8 +979,12 @@ select.duc-input{min-width:100px}
      * and filters by title / id / path as you type; a match keeps its
      * parent and children visible (P2).
      */
-    function SessionPicker({ t, fmt, value, label, onPick }) {
-      const [open, setOpen] = useState(false);
+    function SessionPicker({ t, fmt, value, label, onPick, open: openProp, onToggle }) {
+      const [openState, setOpenState] = useState(false);
+      const open = openProp ?? openState;
+      // Controlled (exclusive) or internal toggle — same chrome either way.
+      const togglePanel = () => (onToggle !== undefined ? onToggle() : setOpenState((v) => !v));
+      const closePanel = () => (onToggle !== undefined ? onToggle() : setOpenState(false));
       const [search, setSearch] = useState('');
       const [state, setState] = useState({ loading: false, error: null, items: null });
       useEffect(() => {
@@ -1021,7 +1031,7 @@ select.duc-input{min-width:100px}
         .sort((a, b) => (b.lastTimestamp ?? 0) - (a.lastTimestamp ?? 0));
       const row = (s, depth) => h('button', {
         type: 'button', className: 'duc-pickerrow', 'aria-pressed': String(s.sessionId === value),
-        onClick: () => { onPick(s.sessionId, sessionName(s)); setOpen(false); },
+        onClick: () => { onPick(s.sessionId, sessionName(s)); closePanel(); },
       },
         h('span', { style: { paddingLeft: depth * 16, display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 } },
           h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
@@ -1034,7 +1044,7 @@ select.duc-input{min-width:100px}
       return h('div', { className: 'duc-picker' },
         h('button', {
           type: 'button', className: 'duc-pickerbtn', title: value || undefined,
-          onClick: () => setOpen((v) => !v),
+          onClick: () => togglePanel(),
         },
           h('span', null, value ? (label ?? `${value.slice(0, 16)}…`) : t('filter.allSessions')),
           h('span', { className: 'duc-muted', 'aria-hidden': 'true' }, open ? '▴' : '▾'),
@@ -1050,7 +1060,7 @@ select.duc-input{min-width:100px}
               h('div', { className: 'duc-pickerlist' },
                 h('button', {
                   type: 'button', className: 'duc-pickerrow', 'aria-pressed': String(value === ''),
-                  onClick: () => { onPick('', null); setOpen(false); },
+                  onClick: () => { onPick('', null); closePanel(); },
                 }, h('span', null, t('filter.allSessions'))),
                 state.items === null && state.loading
                   ? h('div', { className: 'duc-state duc-small' }, t('state.loading'))
@@ -1061,6 +1071,45 @@ select.duc-input{min-width:100px}
                         return [row(s, 0), ...kids.map((k) => row(k, 1))];
                       }),
                 state.items !== null && roots.length === 0 && q.length > 0
+                  ? h('div', { className: 'duc-state duc-small' }, t('state.empty'))
+                  : null,
+              ),
+            )
+          : null,
+      );
+    }
+
+    /** Plain-option dropdown in the same chrome as the session picker
+     *  (button + panel + rows) so every requests-page filter looks alike.
+     *  Accepts controlled open/onToggle so the four pickers stay mutually
+     *  exclusive, like native selects; falls back to internal state. */
+    function OptionPicker({ t, value, options, allLabel, onPick, open: openProp, onToggle }) {
+      const [openState, setOpenState] = useState(false);
+      const open = openProp ?? openState;
+      const togglePanel = () => (onToggle !== undefined ? onToggle() : setOpenState((v) => !v));
+      const closePanel = () => (onToggle !== undefined ? onToggle() : setOpenState(false));
+      const current = options.find((o) => o.value === value);
+      return h('div', { className: 'duc-picker' },
+        h('button', {
+          type: 'button', className: 'duc-pickerbtn', title: current?.label ?? undefined,
+          onClick: () => togglePanel(),
+        },
+          h('span', null, current?.label ?? allLabel),
+          h('span', { className: 'duc-muted', 'aria-hidden': 'true' }, open ? '▴' : '▾'),
+        ),
+        open
+          ? h('div', { className: 'duc-pickerpanel' },
+              h('div', { className: 'duc-pickerlist' },
+                h('button', {
+                  type: 'button', className: 'duc-pickerrow', 'aria-pressed': String(current === undefined),
+                  onClick: () => { onPick(''); closePanel(); },
+                }, h('span', null, allLabel)),
+                options.map((o) => h('button', {
+                  type: 'button', className: 'duc-pickerrow', key: o.value,
+                  'aria-pressed': String(o.value === value),
+                  onClick: () => { onPick(o.value); closePanel(); },
+                }, h('span', null, o.label))),
+                options.length === 0
                   ? h('div', { className: 'duc-state duc-small' }, t('state.empty'))
                   : null,
               ),
@@ -1090,6 +1139,13 @@ select.duc-input{min-width:100px}
         [],
       );
       const setInput = (field, value) => setFilters((prev) => ({ ...prev, [field]: value, page: 0 }));
+      // Exclusive-open controller: one filter panel at a time, like the
+      // native selects these pickers replaced.
+      const [openPanel, setOpenPanel] = useState(null);
+      const panelProps = (id) => ({
+        open: openPanel === id,
+        onToggle: () => setOpenPanel((prev) => (prev === id ? null : id)),
+      });
       const providerOptions = (facets.data?.providers?.rows ?? [])
         .map((r) => r.key)
         .filter((key) => typeof key === 'string' && key.length > 0);
@@ -1109,29 +1165,29 @@ select.duc-input{min-width:100px}
       }));
       return h('div', null,
         h('div', { className: 'duc-filters' },
-          h('select', {
-            className: 'duc-input', value: filters.provider ?? '',
-            onChange: (e) => setInput('provider', e.target.value),
-          },
-            h('option', { value: '' }, t('filter.provider')),
-            providerOptions.map((p) => h('option', { key: p, value: p }, p)),
-          ),
-          h('select', {
-            className: 'duc-input', value: filters.model ?? '',
-            onChange: (e) => setInput('model', e.target.value),
-          },
-            h('option', { value: '' }, t('filter.model')),
-            modelOptions.map((m) => h('option', { key: m, value: m }, m)),
-          ),
-          h('select', {
-            className: 'duc-input', value: filters.kind ?? '',
-            onChange: (e) => setInput('kind', e.target.value),
-          },
-            h('option', { value: '' }, t('filter.kind')),
-            KIND_OPTIONS.map((kind) => h('option', { key: kind, value: kind }, kindLabel(kind, t))),
-          ),
+          h(OptionPicker, {
+            t, ...panelProps('provider'),
+            value: filters.provider ?? '',
+            options: providerOptions.map((p) => ({ value: p, label: p })),
+            allLabel: t('filter.providerAll'),
+            onPick: (v) => setInput('provider', v === '' ? undefined : v),
+          }),
+          h(OptionPicker, {
+            t, ...panelProps('model'),
+            value: filters.model ?? '',
+            options: modelOptions.map((m) => ({ value: m, label: m })),
+            allLabel: t('filter.modelAll'),
+            onPick: (v) => setInput('model', v === '' ? undefined : v),
+          }),
+          h(OptionPicker, {
+            t, ...panelProps('kind'),
+            value: filters.kind ?? '',
+            options: KIND_OPTIONS.map((kind) => ({ value: kind, label: kindLabel(kind, t) })),
+            allLabel: t('filter.kindAll'),
+            onPick: (v) => setInput('kind', v === '' ? undefined : v),
+          }),
           h(SessionPicker, {
-            t, fmt,
+            t, fmt, ...panelProps('session'),
             value: filters.sessionId ?? '',
             label: filters.sessionLabel,
             onPick: setSession,
@@ -1307,6 +1363,8 @@ select.duc-input{min-width:100px}
       const [importing, setImporting] = useState(false);
       const [importError, setImportError] = useState(null);
       const [historyChoice, setHistoryChoice] = useState('today');
+      // Manual pick per ambiguous normalized row: row key -> candidate id.
+      const [pickedCand, setPickedCand] = useState({});
       useEffect(() => {
         if (fetched) return;
         setFetched(true);
@@ -1330,10 +1388,24 @@ select.duc-input{min-width:100px}
         return () => { alive = false; };
       }, []);
       const keyOf = (s) => `${s.provider ?? ''}/${s.model}`;
-      const selected = state.suggestions.filter(
-        (s) => checked[keyOf(s)] === true && s.matchId !== null
-          && (s.input !== null || s.output !== null || s.cacheRead !== null || s.cacheWrite !== null),
-      );
+      // Version-normalized rows resolve lazily: a sole candidate is offered
+      // pre-picked (still unchecked); several candidates stay unresolved
+      // until the user picks one — never auto-selected.
+      const candidatesOf = (s) => (Array.isArray(s.normalizedCandidates) ? s.normalizedCandidates : []);
+      const chosenOf = (s) => {
+        if (s.matchQuality !== 'normalized') return s.matchId === null ? null : s;
+        const cands = candidatesOf(s);
+        if (cands.length > 1) {
+          const hit = cands.find((c) => c.id === pickedCand[keyOf(s)]);
+          return hit === undefined ? null : hit;
+        }
+        return s.matchId === null ? null : s;
+      };
+      const selected = state.suggestions.filter((s) => {
+        const eff = chosenOf(s);
+        return checked[keyOf(s)] === true && eff !== null
+          && (eff.input !== null || eff.output !== null || eff.cacheRead !== null || eff.cacheWrite !== null);
+      });
       const priceCell = (s) => {
         const line = (label, value) => (value === null || value === undefined ? null : `${label} $${value}`);
         const lines = [
@@ -1350,6 +1422,26 @@ select.duc-input{min-width:100px}
       const matchTag = (s) => s.matchQuality === null
         ? t('suggest.match.none')
         : t(`suggest.match.${s.matchQuality}`);
+      const matchTitle = (s) => {
+        if (s.matchQuality !== 'normalized') return s.matchId ?? undefined;
+        const eff = chosenOf(s);
+        return eff === null ? t('suggest.match.ambiguous')
+          : interpolate(t('suggest.match.normalized.reason'), { from: s.model, to: eff.id ?? eff.matchId });
+      };
+      const matchCell = (s) => {
+        if (s.matchQuality === 'normalized' && candidatesOf(s).length > 1) {
+          return h('select', {
+            className: 'duc-small',
+            'aria-label': `${s.model} — ${t('suggest.match')}`,
+            value: pickedCand[keyOf(s)] ?? '',
+            onChange: (e) => setPickedCand((prev) => ({ ...prev, [keyOf(s)]: e?.target?.value ?? '' })),
+          },
+            h('option', { value: '' }, t('suggest.match.ambiguous')),
+            candidatesOf(s).map((c) => h('option', { key: c.id, value: c.id }, `${c.id} (${t('suggest.match.normalized')})`)),
+          );
+        }
+        return s.matchId === null ? t('suggest.match.none') : `${s.matchId} (${matchTag(s)})`;
+      };
       const history = state.history;
       const firstDate = history !== null && typeof history.first === 'number'
         ? (() => {
@@ -1373,14 +1465,17 @@ select.duc-input{min-width:100px}
         setImporting(true);
         setImportError(null);
         apiPost('/prices/import', {
-          models: selected.map((s) => ({
-            provider: s.provider ?? undefined,
-            model: s.model,
-            input: s.input ?? undefined,
-            output: s.output ?? undefined,
-            cacheRead: s.cacheRead ?? undefined,
-            cacheWrite: s.cacheWrite ?? undefined,
-          })),
+          models: selected.map((s) => {
+            const eff = chosenOf(s) ?? s;
+            return {
+              provider: s.provider ?? undefined,
+              model: s.model,
+              input: eff.input ?? undefined,
+              output: eff.output ?? undefined,
+              cacheRead: eff.cacheRead ?? undefined,
+              cacheWrite: eff.cacheWrite ?? undefined,
+            };
+          }),
           ...(historyChoice === 'earlier' && firstDate !== null ? { effectiveFrom: firstDate } : {}),
           ...(historyChoice === 'retro' ? { retroactive: true } : {}),
         })
@@ -1419,13 +1514,12 @@ select.duc-input{min-width:100px}
                               type: 'checkbox',
                               'aria-label': s.model,
                               checked: checked[keyOf(s)] === true,
-                              disabled: s.matchId === null,
+                              disabled: chosenOf(s) === null,
                               onClick: () => setChecked((prev) => ({ ...prev, [keyOf(s)]: !(prev[keyOf(s)] === true) })),
                             })),
                           h('td', null, `${s.provider ?? '?'} / ${s.model}`),
-                          h('td', { className: 'duc-small', title: s.matchId ?? undefined },
-                            s.matchId === null ? t('suggest.match.none') : `${s.matchId} (${matchTag(s)})`),
-                          h('td', { className: 'num duc-small' }, priceCell(s)),
+                          h('td', { className: 'duc-small', title: matchTitle(s) }, matchCell(s)),
+                          h('td', { className: 'num duc-small' }, priceCell(chosenOf(s) ?? s)),
                         ))),
                       ),
                     ),

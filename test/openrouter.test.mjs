@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { perMillion, matchOpenRouter, buildSuggestions } from '../lib/domain/openrouter.js';
+import { perMillion, matchOpenRouter, buildSuggestions, normalizedMatches, versionSeparatorKey } from '../lib/domain/openrouter.js';
 
 const OR_FIXTURE = [
   { id: 'z-ai/glm-5.3', name: 'GLM 5.3', pricing: { prompt: '0.0000005', completion: '0.0000015', input_cache_read: '0.00000005', input_cache_write: '0.0000007' } },
@@ -95,4 +95,97 @@ test('buildSuggestions fills prices, checked defaults, and null on no match', ()
   const nullModel = suggestions[3];
   assert.equal(nullModel.matchId, null);
   assert.equal(nullModel.checked, false);
+});
+
+test('versionSeparatorKey rewrites only single-digit version separators', () => {
+  assert.equal(versionSeparatorKey('claude5-5'), 'claude5.5');
+  assert.equal(versionSeparatorKey('anthropic/claude-sonnet-4-5'), 'anthropic/claude-sonnet-4.5');
+  assert.equal(versionSeparatorKey('gemini-2-5-pro'), 'gemini-2.5-pro');
+  assert.equal(versionSeparatorKey('claude-3-5-haiku-20241022'), 'claude-3.5-haiku-20241022');
+  // Ordinary hyphens, dates, snapshots, and sizes keep their separators.
+  assert.equal(versionSeparatorKey('deepseek-flash'), 'deepseek-flash');
+  assert.equal(versionSeparatorKey('model-2024-01'), 'model-2024-01');
+  assert.equal(versionSeparatorKey('gpt-4o-2024-11-20'), 'gpt-4o-2024-11-20');
+  assert.equal(versionSeparatorKey('glm-4-32b'), 'glm-4-32b');
+  assert.equal(versionSeparatorKey('gpt-5-preview'), 'gpt-5-preview');
+});
+
+test('exact id outranks the dotted twin', () => {
+  const fixture = [
+    { id: 'anthropic/claude5.5', name: 'Claude 5.5', pricing: {} },
+    { id: 'anthropic/claude5-5', name: 'Claude 5.5', pricing: {} },
+  ];
+  const hit = matchOpenRouter({ provider: 'anthropic', model: 'claude5-5' }, fixture);
+  assert.equal(hit?.model.id, 'anthropic/claude5-5');
+  assert.equal(hit?.quality, 'exact');
+});
+
+test('suffix match outranks the normalized tier', () => {
+  const fixture = [
+    { id: 'z-ai/glm-5.3', name: 'GLM 5.3', pricing: {} },
+    { id: 'glm/glm-5-3', name: 'GLM 5.3', pricing: {} },
+  ];
+  const [row] = buildSuggestions([{ provider: 'glm', model: 'glm-5.3', requests: 1, tokens: 1 }], fixture);
+  assert.equal(row?.matchId, 'z-ai/glm-5.3');
+  assert.equal(row?.matchQuality, 'suffix');
+  assert.deepEqual(row?.normalizedCandidates, []);
+});
+
+test('single normalized candidate is reported but never pre-checked', () => {
+  const fixture = [
+    { id: 'anthropic/claude5.5', name: 'Claude 5.5', pricing: { prompt: '0.000003', completion: '0.000015' } },
+  ];
+  const [row] = buildSuggestions([{ provider: 'anthropic', model: 'claude5-5', requests: 8, tokens: 900000 }], fixture);
+  assert.equal(row?.matchId, 'anthropic/claude5.5');
+  assert.equal(row?.matchQuality, 'normalized');
+  assert.equal(row?.checked, false);
+  assert.equal(row?.input, 3);
+  assert.equal(row?.output, 15);
+  assert.deepEqual(row?.normalizedCandidates?.map((c) => c.id), ['anthropic/claude5.5']);
+});
+
+test('normalized tier outranks fuzzy display-name matches', () => {
+  const fixture = [
+    { id: 'anthropic/claude5.5', name: 'Claude 5.5', pricing: { prompt: '0.000003' } },
+    { id: 'anthropic/claude5-5-family', name: 'Claude5-5 Family', pricing: {} },
+  ];
+  const [row] = buildSuggestions([{ provider: 'anthropic', model: 'claude5-5', requests: 1, tokens: 1 }], fixture);
+  assert.equal(row?.matchId, 'anthropic/claude5.5');
+  assert.equal(row?.matchQuality, 'normalized');
+});
+
+test('ordinary hyphens never become version matches', () => {
+  const fixture = [
+    { id: 'deepseek/deepseek.flash', name: 'DeepSeek Flash', pricing: {} },
+    { id: 'acme/model-2024.01', name: 'Model 2024.01', pricing: {} },
+  ];
+  assert.equal(matchOpenRouter({ provider: 'deepseek', model: 'deepseek-flash' }, fixture), null);
+  assert.deepEqual(normalizedMatches({ provider: 'deepseek', model: 'deepseek-flash' }, fixture), []);
+  assert.deepEqual(normalizedMatches({ provider: 'acme', model: 'model-2024-01' }, fixture), []);
+});
+
+test('preview variants are not version-matched', () => {
+  // `gpt-5-5` must not reach a preview variant…
+  const previews = [{ id: 'openai/gpt-5-preview', name: 'GPT-5 Preview', pricing: {} }];
+  assert.deepEqual(normalizedMatches({ provider: 'openai', model: 'gpt-5-5' }, previews), []);
+  assert.equal(matchOpenRouter({ provider: 'openai', model: 'gpt-5-5' }, previews), null);
+  // …and a preview model never normalizes onto the plain dotted twin.
+  const twins = [{ id: 'openai/gpt-5.5', name: 'GPT-5.5', pricing: {} }];
+  assert.deepEqual(normalizedMatches({ provider: 'openai', model: 'gpt-5-preview' }, twins), []);
+});
+
+test('multiple normalized candidates are never auto-picked', () => {
+  const fixture = [
+    { id: 'qwenlab/qwen-4.6', name: 'Qwen 4.6', pricing: { prompt: '0.0000006', completion: '0.0000024' } },
+    { id: 'openrouter/qwen-4.6', name: 'Qwen 4.6 (openrouter)', pricing: { prompt: '0.0000005', completion: '0.0000022' } },
+  ];
+  const [row] = buildSuggestions([{ provider: 'qwenlab', model: 'qwen-4-6', requests: 2, tokens: 40000 }], fixture);
+  assert.equal(row?.matchId, null);
+  assert.equal(row?.matchName, null);
+  assert.equal(row?.matchQuality, 'normalized');
+  assert.equal(row?.checked, false);
+  assert.equal(row?.input, null);
+  // Sorted by id for stable display — not catalog order, no shortest-id pick.
+  assert.deepEqual(row?.normalizedCandidates?.map((c) => c.id), ['openrouter/qwen-4.6', 'qwenlab/qwen-4.6']);
+  assert.equal(row?.normalizedCandidates?.[1]?.input, 0.6);
 });

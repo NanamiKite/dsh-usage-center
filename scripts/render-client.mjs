@@ -251,9 +251,14 @@ const suggestFixture = {
   fetchedAt: 1794280000000,
   historyBefore: { count: 120, first: 1794280000000 - 5 * 86_400_000 },
   suggestions: [
-    { provider: 'glm', model: 'glm-5.3', requests: 500, tokens: 61_000_000, matchId: 'z-ai/glm-5.3', matchName: 'GLM 5.3', matchQuality: 'suffix', input: 0.5, output: 1.5, cacheRead: 0.05, cacheWrite: 0.7, checked: true },
-    { provider: 'deepseek-account', model: 'deepseek-flash', requests: 90, tokens: 11_000_000, matchId: 'deepseek/deepseek-flash', matchName: 'DeepSeek Flash', matchQuality: 'exact', input: 0.27, output: 1.1, cacheRead: 0.007, cacheWrite: null, checked: true },
-    { provider: 'gpt', model: 'gpt-6.1-sol', requests: 10, tokens: 8630, matchId: null, matchName: null, matchQuality: null, input: null, output: null, cacheRead: null, cacheWrite: null, checked: false },
+    { provider: 'glm', model: 'glm-5.3', requests: 500, tokens: 61_000_000, matchId: 'z-ai/glm-5.3', matchName: 'GLM 5.3', matchQuality: 'suffix', input: 0.5, output: 1.5, cacheRead: 0.05, cacheWrite: 0.7, checked: true, normalizedCandidates: [] },
+    { provider: 'deepseek-account', model: 'deepseek-flash', requests: 90, tokens: 11_000_000, matchId: 'deepseek/deepseek-flash', matchName: 'DeepSeek Flash', matchQuality: 'exact', input: 0.27, output: 1.1, cacheRead: 0.007, cacheWrite: null, checked: true, normalizedCandidates: [] },
+    { provider: 'gpt', model: 'gpt-6.1-sol', requests: 10, tokens: 8630, matchId: null, matchName: null, matchQuality: null, input: null, output: null, cacheRead: null, cacheWrite: null, checked: false, normalizedCandidates: [] },
+    { provider: 'anthropic', model: 'claude5-5', requests: 8, tokens: 900_000, matchId: 'anthropic/claude5.5', matchName: 'Claude 5.5', matchQuality: 'normalized', normalizedCandidates: [{ id: 'anthropic/claude5.5', input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }], input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, checked: false },
+    { provider: 'qwenlab', model: 'qwen-4-6', requests: 2, tokens: 40_000, matchId: null, matchName: null, matchQuality: 'normalized', normalizedCandidates: [
+      { id: 'openrouter/qwen-4.6', input: 0.5, output: 2.2, cacheRead: null, cacheWrite: null },
+      { id: 'qwenlab/qwen-4.6', input: 0.6, output: 2.4, cacheRead: null, cacheWrite: null },
+    ], input: null, output: null, cacheRead: null, cacheWrite: null, checked: false },
   ],
 };
 globalThis.fetch = (url, options) => {
@@ -475,19 +480,53 @@ for (const label of ['请求', '台账', '费用', '总览', '请求']) {
 
 assert.match(textOf(tree), /上一页/, 'requests pager rendered');
 
-// Requests filters: provider/model/kind dropdowns from ledger facets; the
-// session picker loads nothing until opened (no eager context overview).
-const filterSelects = collectNodes(tree).filter((n) => n.tag === 'select');
-assert.ok(filterSelects.length >= 3, 'provider/model/kind dropdowns rendered');
-const filterSelectText = filterSelects.map((s) => textOf(s)).join('|');
-assert.match(filterSelectText, /glm-5\.3/, 'model options populated');
-assert.match(filterSelectText, /deepseek-account/, 'provider options populated');
+// Requests filters: provider/model/kind pickers share the session picker's
+// chrome and open exclusively; the session picker loads nothing until
+// opened (no eager context overview).
+const pickerBtns = () => collectNodes(tree).filter(
+  (n) => n.tag === 'button' && n.props.className === 'duc-pickerbtn');
+const pickerBtn = () => pickerBtns()[3]; // provider / model / kind / session
+assert.equal(pickerBtns().length, 4, 'four picker buttons rendered (provider/model/kind/session)');
+assert.match(textOf(pickerBtns()[0]), /全部提供商/, 'provider picker defaults to all');
+pickerBtns()[0].props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+const providerRow = () => collectNodes(tree).find(
+  (n) => n.tag === 'button' && n.props.className === 'duc-pickerrow' && textOf(n).includes('deepseek-account'));
+assert.ok(providerRow() !== undefined, 'provider options populated');
+// Opening the model picker closes the provider panel (exclusive-open).
+pickerBtns()[1].props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.ok(providerRow() === undefined, 'opening another picker closes the first panel');
+const modelRow = collectNodes(tree).find(
+  (n) => n.tag === 'button' && n.props.className === 'duc-pickerrow' && textOf(n).includes('glm-5.3'));
+assert.ok(modelRow !== undefined, 'model options populated');
+modelRow.props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(pickerBtns()[1]), /glm-5\.3/, 'model pick shows on the button');
+assert.match(textOf(tree), /清除筛选/, 'clear button appears once a filter is set');
+pickerBtns()[0].props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+providerRow().props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(pickerBtns()[0]), /deepseek-account/, 'provider pick shows on the button');
+findButtonWithText(tree, '清除筛选').props.onClick();
+dirty = true;
+await settle();
+tree = renderDashboard();
+assert.match(textOf(pickerBtns()[0]), /全部提供商/, 'clear resets the pickers');
 assert.ok(
   !fetchedUrls.some((u) => u.endsWith('/context')),
   'no eager context-overview fetch on the requests page',
-);
-const pickerBtn = () => collectNodes(tree).find(
-  (n) => n.tag === 'button' && n.props.className === 'duc-pickerbtn',
 );
 assert.ok(pickerBtn() !== undefined, 'session picker button rendered');
 assert.match(textOf(pickerBtn()), /全部会话/, 'picker defaults to all sessions');
@@ -535,9 +574,32 @@ assert.match(textOf(tree), /OpenRouter/, 'source line rendered');
 assert.match(textOf(tree), /z-ai\/glm-5\.3/, 'suggestion match rendered');
 assert.match(textOf(tree), /无匹配/, 'unmatched row rendered');
 const boxes = collectNodes(tree).filter((n) => n.tag === 'input' && n.props.type === 'checkbox');
-assert.equal(boxes.length, 3, 'one checkbox per suggestion');
+assert.equal(boxes.length, 5, 'one checkbox per suggestion');
 assert.equal(boxes[2].props.disabled, true, 'unmatched row disabled');
-boxes[1].props.onClick(); // uncheck deepseek-flash
+assert.equal(boxes[3].props.checked, false, 'normalized match not pre-checked');
+assert.equal(boxes[3].props.disabled, false, 'sole normalized candidate importable');
+assert.equal(boxes[4].props.checked, false, 'ambiguous row not pre-checked');
+assert.equal(boxes[4].props.disabled, true, 'ambiguous row disabled until a candidate is picked');
+const normTip = collectNodes(tree).find(
+  (n) => n.tag === 'td' && String(n.props.title ?? '').includes('claude5-5 → anthropic/claude5.5'));
+assert.ok(normTip !== undefined, 'normalized reason tooltip rendered');
+const candSelect = collectNodes(tree).find(
+  (n) => n.tag === 'select' && textOf(n).includes('存在多个候选'));
+assert.ok(candSelect !== undefined, 'manual-pick select rendered');
+assert.deepEqual(
+  collectNodes(candSelect).filter((n) => n.tag === 'option').map((n) => n.props.value),
+  ['', 'openrouter/qwen-4.6', 'qwenlab/qwen-4.6'],
+  'sorted candidate options, no auto-pick');
+candSelect.props.onChange({ target: { value: 'qwenlab/qwen-4.6' } });
+dirty = true;
+await settle();
+tree = renderDashboard();
+const boxes2 = collectNodes(tree).filter((n) => n.tag === 'input' && n.props.type === 'checkbox');
+assert.equal(boxes2[4].props.disabled, false, 'ambiguous row enabled after the manual pick');
+assert.equal(boxes2[4].props.checked, false, 'manual pick does not auto-check');
+boxes2[1].props.onClick(); // uncheck deepseek-flash
+boxes2[3].props.onClick(); // confirm the normalized single
+boxes2[4].props.onClick(); // confirm the manually picked candidate
 dirty = true;
 await settle();
 tree = renderDashboard();
@@ -553,15 +615,20 @@ await settle();
 tree = renderDashboard();
 const importButton = findButtonWithText(tree, '导入所选');
 assert.ok(importButton !== undefined, 'import button rendered');
-assert.match(textOf(importButton), /\(1\)/, 'one row selected after unchecking');
+assert.match(textOf(importButton), /\(3\)/, 'three rows selected after unchecking and confirms');
 importButton.props.onClick();
 dirty = true;
 await settle();
 tree = renderDashboard();
 assert.ok(importedBody !== null, 'import request posted');
-assert.equal(importedBody.models.length, 1, 'only the checked row posted');
+assert.equal(importedBody.models.length, 3, 'only the checked rows posted');
 assert.equal(importedBody.models[0].model, 'glm-5.3');
 assert.equal(importedBody.models[0].cacheWrite, 0.7);
+const claudeRow = importedBody.models.find((m) => m.model === 'claude5-5');
+assert.equal(claudeRow?.input, 3, 'normalized single posts its catalog prices');
+const qwenRow = importedBody.models.find((m) => m.model === 'qwen-4-6');
+assert.equal(qwenRow?.input, 0.6, 'manual pick posts the chosen candidate prices');
+assert.equal(qwenRow?.output, 2.4);
 assert.equal(importedBody.retroactive, true, 'the retro choice rides along with the import');
 assert.match(textOf(tree), /参考价已写入配置/, 'imported notice rendered');
 
@@ -655,6 +722,10 @@ await settle();
 tree = renderDashboard();
 assert.ok(!textOf(tree).includes('请求详情 · seq 12'), 'drill-down closes');
 
+// Exact-text match: the range chip is plain "全部", while the filter
+// pickers now read "全部提供商 / 全部模型 / 全部类型".
+const allRangeBtn = () => collectNodes(tree).find(
+  (n) => n.tag === 'button' && textOf(n) === '全部' && typeof n.props.onClick === 'function');
 // Click a compaction mark: marker row, its duration and estimate.
 overlay().props.onClick(evAt(3, 8)); // seq 13 compaction
 dirty = true;
@@ -698,7 +769,7 @@ await settle();
 tree = renderDashboard();
 
 // Range switching works and keeps the view consistent.
-findButtonWithText(tree, '全部').props.onClick();
+allRangeBtn().props.onClick();
 dirty = true;
 await settle();
 tree = renderDashboard();
@@ -737,7 +808,7 @@ denseRow.props.onClick();
 dirty = true;
 await settle();
 tree = renderDashboard();
-findButtonWithText(tree, '全部').props.onClick(); // range state persists across sessions
+allRangeBtn().props.onClick(); // range state persists across sessions
 dirty = true;
 await settle();
 tree = renderDashboard();
